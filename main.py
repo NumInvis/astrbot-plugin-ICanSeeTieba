@@ -142,7 +142,7 @@ class TiebaPlugin(Star):
             "hot_reply_threshold": self.hot_reply_threshold,
             "hot_agree_threshold": self.hot_agree_threshold,
             "admin_users": self.admin_users,
-            "forum_groups": self.forum_groups
+            "forum_groups": self.sub_manager.forum_groups
         }
 
         async with self._file_lock:
@@ -160,7 +160,7 @@ class TiebaPlugin(Star):
             "hot_reply_threshold": self.hot_reply_threshold,
             "hot_agree_threshold": self.hot_agree_threshold,
             "admin_users": self.admin_users,
-            "forum_groups": self.forum_groups
+            "forum_groups": self.sub_manager.forum_groups
         }
 
         try:
@@ -174,7 +174,7 @@ class TiebaPlugin(Star):
         async with self._file_lock:
             try:
                 with open(self.subscription_file, 'w', encoding='utf-8') as f:
-                    json.dump({"forum_groups": self.forum_groups}, f, ensure_ascii=False, indent=4)
+                    json.dump({"forum_groups": self.sub_manager.forum_groups}, f, ensure_ascii=False, indent=4)
             except Exception as e:
                 logger.error(f"保存订阅配置失败: {e}")
 
@@ -182,7 +182,7 @@ class TiebaPlugin(Star):
         """同步保存订阅配置"""
         try:
             with open(self.subscription_file, 'w', encoding='utf-8') as f:
-                json.dump({"forum_groups": self.forum_groups}, f, ensure_ascii=False, indent=4)
+                json.dump({"forum_groups": self.sub_manager.forum_groups}, f, ensure_ascii=False, indent=4)
         except Exception as e:
             logger.error(f"保存订阅配置失败: {e}")
 
