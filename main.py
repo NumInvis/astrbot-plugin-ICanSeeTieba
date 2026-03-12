@@ -26,21 +26,15 @@ from .tracker import HotThreadTracker
 from .subscription_manager import SubscriptionManager
 
 
-# 贴吧名称验证正则 - 只允许中文、字母、数字和下划线
-FORUM_NAME_PATTERN = re.compile(r'^[\u4e00-\u9fa5a-zA-Z0-9_\-]+$')
+# 贴吧名称验证正则 - 只允许中文、字母、数字、下划线和连字符，长度2-20
+FORUM_NAME_PATTERN = re.compile(r'^[\u4e00-\u9fa5a-zA-Z0-9_\-]{2,20}$')
 
 
 def validate_forum_name(forum_name: str) -> bool:
-    """验证贴吧名称是否合法（防止路径遍历）"""
+    """验证贴吧名称是否合法（防止路径遍历）- 直接使用正则验证"""
     if not forum_name or not isinstance(forum_name, str):
         return False
-    # 检查长度
-    if len(forum_name) < 1 or len(forum_name) > 50:
-        return False
-    # 检查是否包含路径分隔符或特殊字符
-    if '..' in forum_name or '/' in forum_name or '\\' in forum_name:
-        return False
-    # 使用正则验证
+    # 直接使用正则验证（已包含长度和字符限制）
     return bool(FORUM_NAME_PATTERN.match(forum_name))
 
 
@@ -232,15 +226,19 @@ class TiebaPlugin(Star):
         self._stop_web_manager()
 
     def _start_web_manager(self):
-        """启动Web管理后台服务"""
+        """启动Web管理后台服务 - 使用Uvicorn Server实例以便优雅关闭"""
         try:
-            from .web_manager import run_web_manager
             import threading
+            import uvicorn
+            from .web_manager import app
+            
+            # 创建Uvicorn配置和服务器实例
+            config = uvicorn.Config(app, host='0.0.0.0', port=5000, log_level='warning')
+            self._uvicorn_server = uvicorn.Server(config)
             
             # 在后台线程中启动Web服务
             self._web_thread = threading.Thread(
-                target=run_web_manager,
-                kwargs={'port': 5000},
+                target=self._uvicorn_server.run,
                 daemon=True
             )
             self._web_thread.start()
@@ -249,9 +247,17 @@ class TiebaPlugin(Star):
             logger.error(f"启动Web管理后台失败: {e}")
 
     def _stop_web_manager(self):
-        """停止Web管理后台服务"""
-        # 由于uvicorn在后台线程运行，这里只是记录日志
-        # 实际线程会随着主程序退出而终止
+        """停止Web管理后台服务 - 优雅关闭Uvicorn服务器"""
+        try:
+            if hasattr(self, '_uvicorn_server') and self._uvicorn_server:
+                # 设置should_exit标志，让Uvicorn优雅关闭
+                self._uvicorn_server.should_exit = True
+                logger.info("🌐 Web管理后台正在停止...")
+                # 等待一小段时间让服务器完成关闭
+                import time
+                time.sleep(1)
+        except Exception as e:
+            logger.error(f"停止Web管理后台时出错: {e}")
         logger.info("🌐 Web管理后台已停止")
 
     # ========== 权限检查 ==========
@@ -381,10 +387,10 @@ class TiebaPlugin(Star):
 
                 # 更新统计 - 只要有帖子数据就更新访问记录
                 if new_threads:
-                    self.tracker.update_stats(forum_name, len(new_threads))
+                    await self.tracker.update_stats(forum_name, len(new_threads))
                 else:
                     # 即使没有新帖子，也更新最后访问时间
-                    self.tracker.update_forum_activity(forum_name)
+                    await self.tracker.update_forum_activity(forum_name)
             except (IOError, OSError, TypeError) as e:
                 logger.error(f"保存贴吧[{forum_name}]数据失败: {e}")
 

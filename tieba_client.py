@@ -18,22 +18,34 @@ URL_PATTERN = re.compile(r'^https?://[^\s<>"{}|\\^`\[\]]+$')
 
 
 class TiebaClient:
-    """贴吧客户端"""
+    """贴吧客户端 - 使用上下文管理器模式管理连接"""
 
     def __init__(self):
         self._client: Optional[aiotieba.Client] = None
+        self._client_lock = asyncio.Lock()  # 保护客户端创建和关闭
 
     async def _get_client(self) -> aiotieba.Client:
-        """获取或创建客户端"""
-        if self._client is None:
-            self._client = aiotieba.Client()
-        return self._client
+        """获取或创建客户端 - 使用锁保护，防止并发创建"""
+        async with self._client_lock:
+            if self._client is None:
+                self._client = aiotieba.Client()
+            return self._client
 
     async def close(self):
-        """关闭客户端"""
-        if self._client:
-            await self._client.close()
-            self._client = None
+        """关闭客户端 - 使用锁保护，防止并发关闭"""
+        async with self._client_lock:
+            if self._client:
+                await self._client.close()
+                self._client = None
+
+    async def __aenter__(self):
+        """异步上下文管理器入口"""
+        await self._get_client()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """异步上下文管理器出口 - 确保连接被关闭"""
+        await self.close()
 
     def _is_valid_url(self, url: str) -> bool:
         """验证URL是否有效 - 使用模块级别的预编译正则表达式"""

@@ -223,10 +223,15 @@ def get_mode_display(mode: str) -> str:
     return "贴吧对应群" if mode == MODE_FORUM_GROUPS else "群对应贴吧"
 
 
+# 贴吧名称验证正则 - 与 main.py 保持一致，允许中文、字母、数字、下划线和连字符，长度2-20
+FORUM_NAME_PATTERN = re.compile(r'^[\u4e00-\u9fa5a-zA-Z0-9_\-]{2,20}$')
+
+
 def validate_forum_name(name: str) -> bool:
-    """验证贴吧名称格式"""
-    import re
-    return bool(re.match(r'^[\u4e00-\u9fa5a-zA-Z0-9_]{2,20}$', name))
+    """验证贴吧名称格式 - 与 main.py 保持一致"""
+    if not name or not isinstance(name, str):
+        return False
+    return bool(FORUM_NAME_PATTERN.match(name))
 
 
 def validate_qq(qq: str) -> bool:
@@ -313,7 +318,9 @@ async def login(request: Request, username: str = Form(...), password: str = For
         if 'password_hash' in user_config:
             password_valid = verify_password(password, user_config['password_salt'], user_config['password_hash'])
         else:
-            password_valid = (password == user_config.get('password', ''))
+            # 使用 secrets.compare_digest 防止时序攻击
+            stored_password = user_config.get('password', '')
+            password_valid = secrets.compare_digest(password, stored_password)
             if password_valid:
                 salt, hashed = hash_password(password)
                 user_config['password_salt'] = salt
@@ -564,6 +571,30 @@ async def remove_admin(
     raise HTTPException(status_code=400, detail="管理员不存在或删除失败")
 
 
+def _sync_forum_groups_to_group_forums(forum_groups: Dict) -> Dict:
+    """将forum_groups格式同步到group_forums格式 - 复用业务逻辑"""
+    group_forums = {}
+    for forum, groups in forum_groups.items():
+        for group in groups:
+            if group not in group_forums:
+                group_forums[group] = []
+            if forum not in group_forums[group]:
+                group_forums[group].append(forum)
+    return group_forums
+
+
+def _sync_group_forums_to_forum_groups(group_forums: Dict) -> Dict:
+    """将group_forums格式同步到forum_groups格式 - 复用业务逻辑"""
+    forum_groups = {}
+    for group, forums in group_forums.items():
+        for forum in forums:
+            if forum not in forum_groups:
+                forum_groups[forum] = []
+            if group not in forum_groups[forum]:
+                forum_groups[forum].append(group)
+    return forum_groups
+
+
 @app.post("/switch_mode")
 async def switch_mode(
     request: Request,
@@ -571,7 +602,7 @@ async def switch_mode(
     csrf_token: str = Form(...),
     user: Dict = Depends(require_login)
 ):
-    """切换订阅模式"""
+    """切换订阅模式 - 使用复用的同步函数，遵循DRY原则"""
     # 验证CSRF Token
     if not validate_csrf_token(request, csrf_token):
         raise HTTPException(status_code=403, detail="CSRF验证失败")
@@ -581,27 +612,11 @@ async def switch_mode(
     if mode not in [MODE_FORUM_GROUPS, MODE_GROUP_FORUMS]:
         raise HTTPException(status_code=400, detail="无效的模式")
     
-    # 如果数据不完整，先同步
+    # 如果数据不完整，先同步 - 使用复用的同步函数
     if not config.get("group_forums") and config.get("forum_groups"):
-        # 从forum_groups同步到group_forums
-        group_forums = {}
-        for forum, groups in config["forum_groups"].items():
-            for group in groups:
-                if group not in group_forums:
-                    group_forums[group] = []
-                if forum not in group_forums[group]:
-                    group_forums[group].append(forum)
-        config["group_forums"] = group_forums
+        config["group_forums"] = _sync_forum_groups_to_group_forums(config["forum_groups"])
     elif not config.get("forum_groups") and config.get("group_forums"):
-        # 从group_forums同步到forum_groups
-        forum_groups = {}
-        for group, forums in config["group_forums"].items():
-            for forum in forums:
-                if forum not in forum_groups:
-                    forum_groups[forum] = []
-                if group not in forum_groups[forum]:
-                    forum_groups[forum].append(group)
-        config["forum_groups"] = forum_groups
+        config["forum_groups"] = _sync_group_forums_to_forum_groups(config["group_forums"])
     
     config['subscription_mode'] = mode
     
@@ -726,16 +741,5 @@ async def remove_group(
     raise HTTPException(status_code=400, detail="群不存在或删除失败")
 
 
-def run_web_manager(port=5000):
-    """运行Web管理界面"""
-    import uvicorn
-    logger.info(f"🌐 贴吧观察者管理界面已启动")
-    logger.info(f"📍 访问地址: http://0.0.0.0:{port}")
-    logger.info(f"🔐 默认用户名: root")
-    logger.info(f"🔐 默认密码: moning")
-    logger.info(f"⚠️  请确保端口 {port} 已开放")
-    uvicorn.run(app, host='0.0.0.0', port=port)
-
-
-if __name__ == '__main__':
-    run_web_manager()
+# 导出 app 实例供 main.py 使用
+__all__ = ['app', 'check_config_reload', 'validate_forum_name']

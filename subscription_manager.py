@@ -5,6 +5,7 @@
 2. group_forums: 群对应贴吧 - {群号: [贴吧名列表]}
 """
 
+import asyncio
 import copy
 import json
 import os
@@ -24,7 +25,8 @@ class SubscriptionManager:
     def __init__(self, data_dir: str):
         self.data_dir = data_dir
         self.config_file = os.path.join(data_dir, "config.json")
-        self.lock = FileLock(os.path.join(data_dir, "config.lock"))
+        self._file_lock = FileLock(os.path.join(data_dir, "config.lock"))
+        self._async_lock = asyncio.Lock()  # 异步锁，防止协程间竞争
         
         # 数据存储
         self._forum_groups: Dict[str, List[str]] = {}  # {贴吧: [群列表]}
@@ -33,35 +35,56 @@ class SubscriptionManager:
         
         self._load()
     
-    def _load(self):
-        """加载配置"""
-        with self.lock:
+    def _load_sync(self):
+        """同步加载配置（在线程中执行）"""
+        with self._file_lock:
             if os.path.exists(self.config_file):
                 try:
                     with open(self.config_file, 'r', encoding='utf-8') as f:
                         data = json.load(f)
-                    
-                    # 加载模式
-                    self._mode = data.get("subscription_mode", self.MODE_FORUM_GROUPS)
-                    
-                    # 加载forum_groups格式
-                    self._forum_groups = data.get("forum_groups", {})
-                    
-                    # 加载group_forums格式
-                    self._group_forums = data.get("group_forums", {})
-                    
-                    # 如果只有一种数据，自动转换另一种
-                    if not self._group_forums and self._forum_groups:
-                        self._sync_to_group_forums()
-                    elif not self._forum_groups and self._group_forums:
-                        self._sync_to_forum_groups()
-                    
+                    return data
                 except (json.JSONDecodeError, IOError, OSError) as e:
                     logger.error(f"加载订阅配置失败: {e}")
+            return {}
     
-    def _save(self):
-        """保存配置"""
-        with self.lock:
+    def _load(self):
+        """加载配置"""
+        data = self._load_sync()
+        if data:
+            # 加载模式
+            self._mode = data.get("subscription_mode", self.MODE_FORUM_GROUPS)
+            
+            # 加载forum_groups格式
+            self._forum_groups = data.get("forum_groups", {})
+            
+            # 加载group_forums格式
+            self._group_forums = data.get("group_forums", {})
+            
+            # 如果只有一种数据，自动转换另一种
+            if not self._group_forums and self._forum_groups:
+                self._sync_to_group_forums()
+            elif not self._forum_groups and self._group_forums:
+                self._sync_to_forum_groups()
+    
+    async def _load_async(self):
+        """异步加载配置 - 将同步操作放到线程中执行，避免阻塞事件循环"""
+        import asyncio
+        loop = asyncio.get_event_loop()
+        data = await loop.run_in_executor(None, self._load_sync)
+        if data:
+            async with self._async_lock:
+                self._mode = data.get("subscription_mode", self.MODE_FORUM_GROUPS)
+                self._forum_groups = data.get("forum_groups", {})
+                self._group_forums = data.get("group_forums", {})
+                
+                if not self._group_forums and self._forum_groups:
+                    self._sync_to_group_forums()
+                elif not self._forum_groups and self._group_forums:
+                    self._sync_to_forum_groups()
+    
+    def _save_sync(self) -> bool:
+        """同步保存配置（在线程中执行）"""
+        with self._file_lock:
             try:
                 # 先读取现有配置
                 config = {}
@@ -80,6 +103,17 @@ class SubscriptionManager:
             except (IOError, OSError, TypeError) as e:
                 logger.error(f"保存订阅配置失败: {e}")
                 return False
+    
+    def _save(self):
+        """保存配置"""
+        return self._save_sync()
+    
+    async def _save_async(self) -> bool:
+        """异步保存配置 - 将同步操作放到线程中执行，避免阻塞事件循环"""
+        import asyncio
+        loop = asyncio.get_event_loop()
+        async with self._async_lock:
+            return await loop.run_in_executor(None, self._save_sync)
     
     def _sync_to_group_forums(self):
         """将forum_groups同步到group_forums"""

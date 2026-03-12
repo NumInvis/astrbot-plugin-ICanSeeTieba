@@ -2,6 +2,7 @@
 热帖追踪和统计模块
 """
 
+import asyncio
 import json
 import os
 from datetime import datetime, timedelta
@@ -11,7 +12,7 @@ from astrbot.api import logger
 
 
 class HotThreadTracker:
-    """热帖追踪器"""
+    """热帖追踪器 - 使用锁保护并发写入"""
     
     def __init__(self, data_dir: str):
         """
@@ -25,6 +26,8 @@ class HotThreadTracker:
         self.stats_file = os.path.join(data_dir, "stats.json")
         self.hot_threads: Dict[str, Dict] = self._load_hot_threads()
         self.stats: Dict = self._load_stats()
+        # 异步锁，保护并发写入
+        self._lock = asyncio.Lock()
     
     def _load_hot_threads(self) -> Dict[str, Dict]:
         """加载已记录的热帖数据"""
@@ -158,55 +161,57 @@ class HotThreadTracker:
                 "first_detected": now
             }
     
-    def update_stats(self, tieba_name: str, new_posts_count: int = 1):
+    async def update_stats(self, tieba_name: str, new_posts_count: int = 1):
         """
-        更新统计数据
+        更新统计数据 - 使用异步锁保护并发写入
         
         Args:
             tieba_name: 贴吧名称
             new_posts_count: 新帖子数量
         """
-        today = datetime.now().strftime("%Y-%m-%d")
-        
-        # 更新每日发帖统计
-        if today not in self.stats["daily_posts"]:
-            self.stats["daily_posts"][today] = {}
-        if tieba_name not in self.stats["daily_posts"][today]:
-            self.stats["daily_posts"][today][tieba_name] = 0
-        self.stats["daily_posts"][today][tieba_name] += new_posts_count
-        
-        # 更新贴吧活跃度
-        if tieba_name not in self.stats["forum_activity"]:
-            self.stats["forum_activity"][tieba_name] = {
-                "total_posts": 0,
-                "first_seen": today,
-                "last_post": today
-            }
-        self.stats["forum_activity"][tieba_name]["total_posts"] += new_posts_count
-        self.stats["forum_activity"][tieba_name]["last_post"] = today
-        
-        self._save_stats()
+        async with self._lock:
+            today = datetime.now().strftime("%Y-%m-%d")
+            
+            # 更新每日发帖统计
+            if today not in self.stats["daily_posts"]:
+                self.stats["daily_posts"][today] = {}
+            if tieba_name not in self.stats["daily_posts"][today]:
+                self.stats["daily_posts"][today][tieba_name] = 0
+            self.stats["daily_posts"][today][tieba_name] += new_posts_count
+            
+            # 更新贴吧活跃度
+            if tieba_name not in self.stats["forum_activity"]:
+                self.stats["forum_activity"][tieba_name] = {
+                    "total_posts": 0,
+                    "first_seen": today,
+                    "last_post": today
+                }
+            self.stats["forum_activity"][tieba_name]["total_posts"] += new_posts_count
+            self.stats["forum_activity"][tieba_name]["last_post"] = today
+            
+            self._save_stats()
 
-    def update_forum_activity(self, tieba_name: str):
+    async def update_forum_activity(self, tieba_name: str):
         """
-        更新贴吧活跃度（仅更新最后访问时间，不增加计数）
+        更新贴吧活跃度（仅更新最后访问时间，不增加计数）- 使用异步锁保护
 
         Args:
             tieba_name: 贴吧名称
         """
-        today = datetime.now().strftime("%Y-%m-%d")
+        async with self._lock:
+            today = datetime.now().strftime("%Y-%m-%d")
 
-        # 更新贴吧活跃度
-        if tieba_name not in self.stats["forum_activity"]:
-            self.stats["forum_activity"][tieba_name] = {
-                "total_posts": 0,
-                "first_seen": today,
-                "last_post": today
-            }
-        else:
-            self.stats["forum_activity"][tieba_name]["last_post"] = today
+            # 更新贴吧活跃度
+            if tieba_name not in self.stats["forum_activity"]:
+                self.stats["forum_activity"][tieba_name] = {
+                    "total_posts": 0,
+                    "first_seen": today,
+                    "last_post": today
+                }
+            else:
+                self.stats["forum_activity"][tieba_name]["last_post"] = today
 
-        self._save_stats()
+            self._save_stats()
 
     def get_daily_stats(self, days: int = 7) -> Dict[str, Dict]:
         """
