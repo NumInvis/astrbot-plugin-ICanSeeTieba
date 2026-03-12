@@ -12,7 +12,7 @@
 
 本项目是基于 **nonebot-plugin-tieba-monitor** 移植的 AstrBot 插件。
 
-- **原项目**: nonebot-plugin-tieba-monitor (NoneBot2 贴吧监控插件)
+- **原项目**: [nonebot-plugin-tieba-monitor](https://pypi.org/project/nonebot-plugin-tieba-monitor/) (NoneBot2 贴吧监控插件)
 - **移植作者**: [NumInvis](https://github.com/NumInvis)
 - **适配平台**: [AstrBot](https://github.com/AstrBotDevs/AstrBot)
 
@@ -206,7 +206,8 @@ astrbot_plugin_ICanSeeTieba/
 ## 致谢
 
 ### 原项目
-- **nonebot-plugin-tieba-monitor** - 本项目的原始代码基础
+- **[nonebot-plugin-tieba-monitor](https://pypi.org/project/nonebot-plugin-tieba-monitor/)** - 本项目的原始代码基础
+  - PyPI: https://pypi.org/project/nonebot-plugin-tieba-monitor/
   - 感谢原作者开发的优秀 NoneBot2 贴吧监控插件
 
 ### 依赖项目
