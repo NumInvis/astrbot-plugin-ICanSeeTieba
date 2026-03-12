@@ -150,16 +150,72 @@ def load_config() -> Dict:
         }
 
 
-def save_config(config: Dict):
-    """保存配置"""
+def save_config(config: Dict, notify_reload: bool = True):
+    """保存配置
+    
+    Args:
+        config: 配置字典
+        notify_reload: 是否通知主程序重载配置
+    """
     with CONFIG_LOCK:
         try:
             with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
                 json.dump(config, f, ensure_ascii=False, indent=4)
+            
+            # 写入重载标记文件，通知主程序配置已变更
+            if notify_reload:
+                reload_flag = os.path.join(DATA_DIR, ".config_reload_flag")
+                try:
+                    with open(reload_flag, 'w') as f:
+                        f.write(str(datetime.now().timestamp()))
+                except (IOError, OSError):
+                    pass
+            
             return True
         except (IOError, OSError, TypeError) as e:
             logger.error(f"保存配置失败: {e}")
             return False
+
+
+def check_config_reload(sub_manager) -> bool:
+    """检查是否需要重载配置
+    
+    Args:
+        sub_manager: SubscriptionManager 实例
+        
+    Returns:
+        是否进行了重载
+    """
+    reload_flag = os.path.join(DATA_DIR, ".config_reload_flag")
+    if not os.path.exists(reload_flag):
+        return False
+    
+    try:
+        with open(reload_flag, 'r') as f:
+            flag_time = float(f.read().strip())
+        
+        # 检查标记文件是否在最近30秒内创建
+        if datetime.now().timestamp() - flag_time < 30:
+            # 重新加载配置
+            sub_manager._load()
+            logger.info("配置已从Web后台更新，已重载")
+            
+            # 删除标记文件
+            try:
+                os.remove(reload_flag)
+            except (IOError, OSError):
+                pass
+            return True
+        else:
+            # 标记文件过期，删除它
+            try:
+                os.remove(reload_flag)
+            except (IOError, OSError):
+                pass
+    except (IOError, OSError, ValueError):
+        pass
+    
+    return False
 
 
 def get_mode_display(mode: str) -> str:
@@ -287,9 +343,12 @@ async def login(request: Request, username: str = Form(...), password: str = For
     })
 
 
-@app.get("/logout")
-async def logout(request: Request):
-    """退出登录"""
+@app.post("/logout")
+async def logout(request: Request, csrf_token: str = Form(...)):
+    """退出登录 - 使用POST方法并验证CSRF Token，防止CSRF攻击"""
+    # 验证CSRF Token
+    if not validate_csrf_token(request, csrf_token):
+        raise HTTPException(status_code=403, detail="CSRF验证失败")
     request.session.clear()
     return RedirectResponse(url="/login", status_code=302)
 

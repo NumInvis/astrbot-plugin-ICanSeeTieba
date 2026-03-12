@@ -8,6 +8,7 @@ import asyncio
 import json
 import os
 import random
+import re
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Set
 
@@ -23,6 +24,24 @@ from ._version import __version__, __plugin_name__, __author__, __plugin_desc__
 from .tieba_client import TiebaClient
 from .tracker import HotThreadTracker
 from .subscription_manager import SubscriptionManager
+
+
+# 贴吧名称验证正则 - 只允许中文、字母、数字和下划线
+FORUM_NAME_PATTERN = re.compile(r'^[\u4e00-\u9fa5a-zA-Z0-9_\-]+$')
+
+
+def validate_forum_name(forum_name: str) -> bool:
+    """验证贴吧名称是否合法（防止路径遍历）"""
+    if not forum_name or not isinstance(forum_name, str):
+        return False
+    # 检查长度
+    if len(forum_name) < 1 or len(forum_name) > 50:
+        return False
+    # 检查是否包含路径分隔符或特殊字符
+    if '..' in forum_name or '/' in forum_name or '\\' in forum_name:
+        return False
+    # 使用正则验证
+    return bool(FORUM_NAME_PATTERN.match(forum_name))
 
 
 @register(__plugin_name__, __author__, __plugin_desc__, __version__)
@@ -127,32 +146,7 @@ class TiebaPlugin(Star):
                 for group in groups:
                     self.sub_manager.subscribe(forum, group)
 
-    async def _save_config_async(self):
-        """异步保存配置到文件（带锁）"""
-        config_data = {
-            "check_interval_seconds": self.check_interval_seconds,
-            "threads_to_retrieve": self.threads_to_retrieve,
-            "hot_reply_threshold": self.hot_reply_threshold,
-            "hot_agree_threshold": self.hot_agree_threshold,
-            "admin_users": self.admin_users,
-            "forum_groups": self.sub_manager.forum_groups
-        }
 
-        async with self._file_lock:
-            try:
-                async with aiofiles.open(self.config_file, 'w', encoding='utf-8') as f:
-                    await f.write(json.dumps(config_data, ensure_ascii=False, indent=4))
-            except (IOError, OSError, TypeError) as e:
-                logger.error(f"保存配置文件失败: {e}")
-
-    async def _save_subscription_async(self):
-        """异步保存订阅配置（带锁）"""
-        async with self._file_lock:
-            try:
-                async with aiofiles.open(self.subscription_file, 'w', encoding='utf-8') as f:
-                    await f.write(json.dumps({"forum_groups": self.sub_manager.forum_groups}, ensure_ascii=False, indent=4))
-            except (IOError, OSError, TypeError) as e:
-                logger.error(f"保存订阅配置失败: {e}")
 
     def _init_scheduler(self):
         """初始化定时任务"""
@@ -203,13 +197,27 @@ class TiebaPlugin(Star):
         logger.info("启动异步监控任务")
         while True:
             try:
+                # 检查Web后台是否修改了配置
+                self._check_config_reload()
                 await self._check_all_forums()
             except (IOError, OSError, ConnectionError) as e:
                 logger.error(f"监控任务出错: {e}")
             await asyncio.sleep(self.check_interval_seconds)
 
+    def _check_config_reload(self):
+        """检查是否需要从Web后台重载配置"""
+        try:
+            from .web_manager import check_config_reload
+            if check_config_reload(self.sub_manager):
+                logger.info("配置已从Web管理后台更新")
+        except Exception as e:
+            logger.debug(f"检查配置重载失败: {e}")
+
     async def initialize(self):
         """插件初始化时执行"""
+        # 启动Web管理后台
+        self._start_web_manager()
+        
         # 延迟初始化定时任务，确保scheduler已准备好
         await asyncio.sleep(2)
         self._init_scheduler()
@@ -220,6 +228,31 @@ class TiebaPlugin(Star):
     async def terminate(self):
         """插件卸载时清理资源"""
         await self.tieba_client.close()
+        # 停止Web服务
+        self._stop_web_manager()
+
+    def _start_web_manager(self):
+        """启动Web管理后台服务"""
+        try:
+            from .web_manager import run_web_manager
+            import threading
+            
+            # 在后台线程中启动Web服务
+            self._web_thread = threading.Thread(
+                target=run_web_manager,
+                kwargs={'port': 5000},
+                daemon=True
+            )
+            self._web_thread.start()
+            logger.info("🌐 Web管理后台已启动: http://0.0.0.0:5000")
+        except Exception as e:
+            logger.error(f"启动Web管理后台失败: {e}")
+
+    def _stop_web_manager(self):
+        """停止Web管理后台服务"""
+        # 由于uvicorn在后台线程运行，这里只是记录日志
+        # 实际线程会随着主程序退出而终止
+        logger.info("🌐 Web管理后台已停止")
 
     # ========== 权限检查 ==========
 
@@ -299,6 +332,11 @@ class TiebaPlugin(Star):
 
     async def _process_threads(self, forum_name: str, threads: List[Dict]) -> List[Dict]:
         """处理帖子数据，过滤已存在的帖子"""
+        # 验证贴吧名称合法性（防止路径遍历）
+        if not validate_forum_name(forum_name):
+            logger.error(f"贴吧名称 '{forum_name}' 包含非法字符，已拒绝处理")
+            return []
+        
         # 加载已有数据
         output_path = os.path.join(self.data_dir, f"{forum_name}.json")
         existing_tids: Set[str] = set()
@@ -712,6 +750,11 @@ class TiebaPlugin(Star):
             yield event.plain_result("❌ 请指定贴吧名\n例: /tb历史 鸣潮\n例: /tb历史 鸣潮 10")
             return
 
+        # 验证贴吧名称合法性（防止路径遍历）
+        if not validate_forum_name(forum_name):
+            yield event.plain_result(f"❌ 贴吧名称 '{forum_name}' 包含非法字符")
+            return
+
         # 解析limit参数
         try:
             limit_num = int(limit)
@@ -761,7 +804,7 @@ class TiebaPlugin(Star):
 
     @filter.command("tb搜索")
     async def cmd_search(self, event: AstrMessageEvent, keyword: str = ""):
-        """搜索帖子"""
+        """搜索帖子 - 优化版本：限制搜索范围，避免内存压力"""
         if not self._is_admin(event):
             yield event.plain_result("⚠️ 只有管理员可以使用此命令")
             return
@@ -770,21 +813,64 @@ class TiebaPlugin(Star):
             yield event.plain_result("❌ 请指定搜索关键词\n例: /tb搜索 攻略")
             return
 
+        # 限制关键词长度
+        if len(keyword) > 50:
+            yield event.plain_result("❌ 关键词过长，请限制在50个字符以内")
+            return
+
         results = []
+        files_searched = 0
+        max_files_to_search = 20  # 最多搜索20个文件
+        max_results = 10  # 最多返回10条结果
+        max_file_size = 5 * 1024 * 1024  # 单个文件最大5MB
+
+        # 只搜索已订阅的贴吧数据文件
+        subscribed_forums = set(self.sub_manager.get_all_forums())
 
         for filename in os.listdir(self.data_dir):
+            if files_searched >= max_files_to_search:
+                break
+
             if not filename.endswith('.json') or filename in ['hot_threads.json', 'stats.json', 'config.json', 'subscription.json']:
                 continue
 
             forum_name = filename[:-5]
+
+            # 只搜索已订阅的贴吧
+            if forum_name not in subscribed_forums:
+                continue
+
+            # 验证贴吧名称合法性
+            if not validate_forum_name(forum_name):
+                continue
+
             file_path = os.path.join(self.data_dir, filename)
 
+            # 检查文件大小，避免大文件导致内存问题
             try:
+                file_size = os.path.getsize(file_path)
+                if file_size > max_file_size:
+                    logger.warning(f"搜索跳过超大文件: {filename} ({file_size} bytes)")
+                    continue
+            except (IOError, OSError):
+                continue
+
+            files_searched += 1
+
+            try:
+                # 使用流式读取，限制读取大小
                 async with aiofiles.open(file_path, 'r', encoding='utf-8') as f:
                     content = await f.read()
+                    # 限制内容大小
+                    if len(content) > max_file_size:
+                        logger.warning(f"搜索跳过内容过大的文件: {filename}")
+                        continue
                     threads = json.loads(content)
 
-                for thread in threads:
+                # 只搜索最近100条帖子，避免遍历全部历史
+                recent_threads = threads[-100:] if len(threads) > 100 else threads
+
+                for thread in recent_threads:
                     title = thread.get('title', '')
                     content_text = thread.get('text', '')
 
@@ -796,11 +882,14 @@ class TiebaPlugin(Star):
                             'time': thread.get('create_time', '')
                         })
 
-                        if len(results) >= 10:
+                        if len(results) >= max_results:
                             break
 
-                if len(results) >= 10:
+                if len(results) >= max_results:
                     break
+
+                # 每处理一个文件后让出事件循环，避免阻塞
+                await asyncio.sleep(0)
 
             except json.JSONDecodeError:
                 logger.warning(f"搜索时JSON解析失败: {file_path}")

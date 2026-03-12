@@ -5,6 +5,7 @@
 2. group_forums: 群对应贴吧 - {群号: [贴吧名列表]}
 """
 
+import copy
 import json
 import os
 from typing import Dict, List, Set, Optional
@@ -248,10 +249,10 @@ class SubscriptionManager:
     
     @property
     def forum_groups(self) -> Dict[str, List[str]]:
-        """以forum_groups格式获取所有订阅（兼容旧代码）"""
-        return self._forum_groups.copy()
+        """以forum_groups格式获取所有订阅（兼容旧代码）- 使用深拷贝防止外部修改"""
+        return copy.deepcopy(self._forum_groups)
     
     @property
     def group_forums(self) -> Dict[str, List[str]]:
-        """以group_forums格式获取所有订阅"""
-        return self._group_forums.copy()
+        """以group_forums格式获取所有订阅 - 使用深拷贝防止外部修改"""
+        return copy.deepcopy(self._group_forums)

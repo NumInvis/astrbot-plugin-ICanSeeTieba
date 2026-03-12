@@ -191,7 +191,10 @@
                 <span class="mode-badge">{{ mode_display }}</span>
                 <span>👤 {{ username }}</span>
                 <a href="/change_password" class="btn-logout">修改密码</a>
-                <a href="/logout" class="btn-logout">退出登录</a>
+                <form method="POST" action="/logout" style="display: inline;">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <button type="submit" class="btn-logout" style="background: none; border: none; cursor: pointer;">退出登录</button>
+                </form>
             </div>
         </div>
 

@@ -13,6 +13,10 @@ import aiotieba
 from astrbot.api import logger
 
 
+# 模块级别的正则表达式常量 - 避免重复编译
+URL_PATTERN = re.compile(r'^https?://[^\s<>"{}|\\^`\[\]]+$')
+
+
 class TiebaClient:
     """贴吧客户端"""
 
@@ -32,12 +36,11 @@ class TiebaClient:
             self._client = None
 
     def _is_valid_url(self, url: str) -> bool:
-        """验证URL是否有效"""
+        """验证URL是否有效 - 使用模块级别的预编译正则表达式"""
         if not url or not isinstance(url, str):
             return False
-        # 检查是否为有效的HTTP/HTTPS URL
-        pattern = re.compile(r'^https?://[^\s<>"{}|\\^`\[\]]+$')
-        return bool(pattern.match(url))
+        # 使用预编译的正则表达式，避免重复编译
+        return bool(URL_PATTERN.match(url))
 
     async def get_threads(self, forum_name: str, retry: int = 3, timeout: int = 30) -> List[Dict]:
         """
