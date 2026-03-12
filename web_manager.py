@@ -1,6 +1,7 @@
 """
 贴吧观察者 - Web管理界面
 用于可视化配置贴吧监控
+支持双模式：贴吧对应群 / 群对应贴吧
 """
 
 import hashlib
@@ -24,6 +25,10 @@ CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 USER_FILE = os.path.join(DATA_DIR, "user.json")
 CONFIG_LOCK = FileLock(os.path.join(DATA_DIR, "config.lock"))
 USER_LOCK = FileLock(os.path.join(DATA_DIR, "user.lock"))
+
+# 订阅模式
+MODE_FORUM_GROUPS = "forum_groups"  # 贴吧对应群
+MODE_GROUP_FORUMS = "group_forums"  # 群对应贴吧
 
 # 默认账号
 DEFAULT_USERNAME = "root"
@@ -104,7 +109,9 @@ def load_config() -> Dict:
         "hot_reply_threshold": 100,
         "hot_agree_threshold": 1000,
         "admin_users": [],
-        "forum_groups": {}
+        "forum_groups": {},
+        "group_forums": {},
+        "subscription_mode": MODE_FORUM_GROUPS
     }
 
 
@@ -120,26 +127,25 @@ def save_config(config: Dict):
             return False
 
 
+def get_mode_display(mode: str) -> str:
+    """获取模式显示名称"""
+    return "贴吧对应群" if mode == MODE_FORUM_GROUPS else "群对应贴吧"
+
+
 def validate_forum_name(name: str) -> bool:
     """验证贴吧名称格式"""
     import re
-    # 贴吧名通常为中英文数字，2-20字符
     return bool(re.match(r'^[\u4e00-\u9fa5a-zA-Z0-9_]{2,20}$', name))
 
 
 def validate_qq(qq: str) -> bool:
     """验证QQ号格式"""
     import re
-    # QQ号为5-11位数字
     return bool(re.match(r'^\d{5,11}$', qq))
 
 
 def validate_group_ids(group_ids_str: str) -> Tuple[bool, List[str], str]:
-    """验证群号列表
-    
-    Returns:
-        (是否有效, 群号列表, 错误信息)
-    """
+    """验证群号列表"""
     if not group_ids_str:
         return False, [], "群号不能为空"
     
@@ -159,6 +165,70 @@ def validate_group_ids(group_ids_str: str) -> Tuple[bool, List[str], str]:
     return True, group_ids, ""
 
 
+# ========== 订阅管理函数 ==========
+
+def sync_forum_to_group(forum_groups: Dict) -> Dict:
+    """将forum_groups转换为group_forums"""
+    group_forums = {}
+    for forum, groups in forum_groups.items():
+        for group in groups:
+            if group not in group_forums:
+                group_forums[group] = []
+            if forum not in group_forums[group]:
+                group_forums[group].append(forum)
+    return group_forums
+
+
+def sync_group_to_forum(group_forums: Dict) -> Dict:
+    """将group_forums转换为forum_groups"""
+    forum_groups = {}
+    for group, forums in group_forums.items():
+        for forum in forums:
+            if forum not in forum_groups:
+                forum_groups[forum] = []
+            if group not in forum_groups[forum]:
+                forum_groups[forum].append(group)
+    return forum_groups
+
+
+def subscribe(forum: str, group: str, config: Dict) -> bool:
+    """订阅贴吧到群"""
+    # 更新forum_groups
+    if "forum_groups" not in config:
+        config["forum_groups"] = {}
+    if forum not in config["forum_groups"]:
+        config["forum_groups"][forum] = []
+    if group not in config["forum_groups"][forum]:
+        config["forum_groups"][forum].append(group)
+    
+    # 更新group_forums
+    if "group_forums" not in config:
+        config["group_forums"] = {}
+    if group not in config["group_forums"]:
+        config["group_forums"][group] = []
+    if forum not in config["group_forums"][group]:
+        config["group_forums"][group].append(forum)
+    
+    return save_config(config)
+
+
+def unsubscribe(forum: str, group: str, config: Dict) -> bool:
+    """取消订阅"""
+    # 从forum_groups移除
+    if forum in config.get("forum_groups", {}) and group in config["forum_groups"][forum]:
+        config["forum_groups"][forum].remove(group)
+        if not config["forum_groups"][forum]:
+            del config["forum_groups"][forum]
+    
+    # 从group_forums移除
+    if group in config.get("group_forums", {}) and forum in config["group_forums"][group]:
+        config["group_forums"][group].remove(forum)
+        if not config["group_forums"][group]:
+            del config["group_forums"][group]
+    
+    return save_config(config)
+
+
 LOGIN_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="zh-CN">
@@ -167,11 +237,7 @@ LOGIN_TEMPLATE = """
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>贴吧观察者 - 登录</title>
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
@@ -312,11 +378,7 @@ CHANGE_PASSWORD_TEMPLATE = """
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>贴吧观察者 - 修改密码</title>
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
@@ -451,11 +513,7 @@ HTML_TEMPLATE = """
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>贴吧观察者 - 管理后台</title>
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
@@ -570,35 +628,45 @@ HTML_TEMPLATE = """
         .btn-warning:hover {
             background: #e67e22;
         }
+        .btn-info {
+            background: #17a2b8;
+            color: white;
+        }
+        .btn-info:hover {
+            background: #138496;
+        }
         .grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
             gap: 20px;
         }
-        .forum-item {
+        .forum-item, .group-item {
             background: #f8f9fa;
             border-radius: 8px;
             padding: 15px;
             margin-bottom: 10px;
         }
-        .forum-name {
+        .forum-name, .group-name {
             font-weight: bold;
             color: #333;
             font-size: 1.1em;
             margin-bottom: 10px;
         }
-        .group-list {
+        .group-list, .forum-list {
             display: flex;
             flex-wrap: wrap;
             gap: 5px;
             margin-bottom: 10px;
         }
-        .group-tag {
+        .group-tag, .forum-tag {
             background: #667eea;
             color: white;
             padding: 4px 10px;
             border-radius: 20px;
             font-size: 12px;
+        }
+        .forum-tag {
+            background: #27ae60;
         }
         .admin-list {
             display: flex;
@@ -638,8 +706,6 @@ HTML_TEMPLATE = """
             font-weight: bold;
             margin-bottom: 5px;
         }
-        .stat-label {
-            opacity: 0.9;
             font-size: 0.9em;
         }
         .flash-messages {
@@ -668,6 +734,35 @@ HTML_TEMPLATE = """
         .delete-form {
             display: inline;
         }
+        .mode-badge {
+            background: #ffc107;
+            color: #333;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: bold;
+        }
+        .tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        .tab {
+            padding: 10px 20px;
+            background: #e9ecef;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.3s;
+        }
+        .tab.active {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+        .tab:hover:not(.active) {
+            background: #dee2e6;
+        }
     </style>
 </head>
 <body>
@@ -678,6 +773,7 @@ HTML_TEMPLATE = """
                 <p>AstrBot 贴吧监控插件管理后台</p>
             </div>
             <div class="user-menu">
+                <span class="mode-badge">{{ mode_display }}</span>
                 <span>👤 {{ username }}</span>
                 <a href="{{ url_for('change_password') }}" class="btn-logout">修改密码</a>
                 <a href="{{ url_for('logout') }}" class="btn-logout">退出登录</a>
@@ -698,11 +794,11 @@ HTML_TEMPLATE = """
         <div class="card">
             <div class="stats">
                 <div class="stat-card">
-                    <div class="stat-value">{{ config.forum_groups|length }}</div>
+                    <div class="stat-value">{{ forum_count }}</div>
                     <div class="stat-label">监控贴吧</div>
                 </div>
                 <div class="stat-card">
-                    <div class="stat-value">{{ total_groups }}</div>
+                    <div class="stat-value">{{ group_count }}</div>
                     <div class="stat-label">订阅群组</div>
                 </div>
                 <div class="stat-card">
@@ -774,10 +870,35 @@ HTML_TEMPLATE = """
             </div>
         </div>
 
-        <!-- 贴吧订阅管理 -->
+        <!-- 模式切换 -->
         <div class="card">
-            <h2>📋 贴吧订阅管理</h2>
-            <form method="POST" action="{{ url_for('add_forum') }}" style="margin-bottom: 25px;">
+            <h2>🔄 订阅显示模式</h2>
+            <p style="margin-bottom: 15px; color: #666;">当前模式：<strong>{{ mode_display }}</strong></p>
+            <div style="display: flex; gap: 10px;">
+                <form method="POST" action="{{ url_for('switch_mode') }}">
+                    <input type="hidden" name="mode" value="forum_groups">
+                    <button type="submit" class="btn btn-info {% if config.subscription_mode == 'forum_groups' %}active{% endif %}">
+                        贴吧对应群
+                    </button>
+                </form>
+                <form method="POST" action="{{ url_for('switch_mode') }}">
+                    <input type="hidden" name="mode" value="group_forums">
+                    <button type="submit" class="btn btn-info {% if config.subscription_mode == 'group_forums' %}active{% endif %}">
+                        群对应贴吧
+                    </button>
+                </form>
+            </div>
+            <p style="margin-top: 15px; color: #999; font-size: 12px;">
+                💡 贴吧对应群：显示每个贴吧推送到哪些群 | 群对应贴吧：显示每个群订阅了哪些贴吧
+            </p>
+        </div>
+
+        <!-- 订阅管理 -->
+        <div class="card">
+            <h2>📋 订阅管理</h2>
+            
+            <!-- 添加订阅表单 -->
+            <form method="POST" action="{{ url_for('add_subscription') }}" style="margin-bottom: 25px;">
                 <div class="grid" style="grid-template-columns: 2fr 2fr 1fr; align-items: end;">
                     <div class="form-group">
                         <label>贴吧名称</label>
@@ -793,27 +914,57 @@ HTML_TEMPLATE = """
                 </div>
             </form>
 
-            {% if config.forum_groups %}
-                {% for forum, groups in config.forum_groups.items() %}
-                    <div class="forum-item">
-                        <div style="display: flex; justify-content: space-between; align-items: center;">
-                            <div>
-                                <div class="forum-name">{{ forum }}吧</div>
-                                <div class="group-list">
-                                    {% for group in groups %}
-                                        <span class="group-tag">{{ group }}</span>
-                                    {% endfor %}
+            <!-- 根据模式显示不同视图 -->
+            {% if config.subscription_mode == 'forum_groups' %}
+                <!-- 贴吧对应群模式 -->
+                <h3 style="margin-bottom: 15px; color: #667eea;">📌 贴吧 → 群</h3>
+                {% if config.forum_groups %}
+                    {% for forum, groups in config.forum_groups.items() %}
+                        <div class="forum-item">
+                            <div style="display: flex; justify-content: space-between; align-items: center;">
+                                <div>
+                                    <div class="forum-name">{{ forum }}吧</div>
+                                    <div class="group-list">
+                                        {% for group in groups %}
+                                            <span class="group-tag">{{ group }}</span>
+                                        {% endfor %}
+                                    </div>
                                 </div>
+                                <form method="POST" action="{{ url_for('remove_forum') }}" class="delete-form" onsubmit="return confirm('确定要删除贴吧 {{ forum }} 的所有订阅吗？');">
+                                    <input type="hidden" name="forum" value="{{ forum }}">
+                                    <button type="submit" class="btn btn-danger">删除</button>
+                                </form>
                             </div>
-                            <form method="POST" action="{{ url_for('remove_forum') }}" class="delete-form" onsubmit="return confirm('确定要删除贴吧 {{ forum }} 的订阅吗？');">
-                                <input type="hidden" name="name" value="{{ forum }}">
-                                <button type="submit" class="btn btn-danger">删除</button>
-                            </form>
                         </div>
-                    </div>
-                {% endfor %}
+                    {% endfor %}
+                {% else %}
+                    <div class="empty-state">暂无订阅的贴吧</div>
+                {% endif %}
             {% else %}
-                <div class="empty-state">暂无订阅的贴吧</div>
+                <!-- 群对应贴吧模式 -->
+                <h3 style="margin-bottom: 15px; color: #27ae60;">📌 群 → 贴吧</h3>
+                {% if config.group_forums %}
+                    {% for group, forums in config.group_forums.items() %}
+                        <div class="group-item">
+                            <div style="display: flex; justify-content: space-between; align-items: center;">
+                                <div>
+                                    <div class="group-name">群 {{ group }}</div>
+                                    <div class="forum-list">
+                                        {% for forum in forums %}
+                                            <span class="forum-tag">{{ forum }}吧</span>
+                                        {% endfor %}
+                                    </div>
+                                </div>
+                                <form method="POST" action="{{ url_for('remove_group') }}" class="delete-form" onsubmit="return confirm('确定要删除群 {{ group }} 的所有订阅吗？');">
+                                    <input type="hidden" name="group" value="{{ group }}">
+                                    <button type="submit" class="btn btn-danger">删除</button>
+                                </form>
+                            </div>
+                        </div>
+                    {% endfor %}
+                {% else %}
+                    <div class="empty-state">暂无订阅的群</div>
+                {% endif %}
             {% endif %}
         </div>
 
@@ -835,16 +986,12 @@ def login():
         username = request.form.get('username', '').strip()
         password = request.form.get('password', '').strip()
         
-        # 验证用户名和密码
         if username == user_config['username']:
-            # 兼容旧版本明文密码
             if 'password_hash' in user_config:
                 password_valid = verify_password(password, user_config['password_salt'], user_config['password_hash'])
             else:
-                # 旧版本明文密码
                 password_valid = (password == user_config.get('password', ''))
                 if password_valid:
-                    # 迁移到哈希存储
                     salt, hashed = hash_password(password)
                     user_config['password_salt'] = salt
                     user_config['password_hash'] = hashed
@@ -889,7 +1036,6 @@ def change_password():
         new_password = request.form.get('new_password', '').strip()
         confirm_password = request.form.get('confirm_password', '').strip()
         
-        # 验证当前密码
         if 'password_hash' in user_config:
             current_valid = verify_password(current_password, user_config['password_salt'], user_config['password_hash'])
         else:
@@ -904,11 +1050,9 @@ def change_password():
         elif new_password == DEFAULT_PASSWORD:
             flash('不能使用默认密码，请设置其他密码！', 'error')
         else:
-            # 使用哈希存储新密码
             salt, hashed = hash_password(new_password)
             user_config['password_salt'] = salt
             user_config['password_hash'] = hashed
-            # 删除旧版本明文密码字段
             if 'password' in user_config:
                 del user_config['password']
             user_config['first_login'] = False
@@ -928,15 +1072,25 @@ def index():
     """首页"""
     config = load_config()
     
-    # 计算总群组数
-    total_groups = set()
-    for groups in config.get("forum_groups", {}).values():
-        total_groups.update(groups)
+    # 计算统计信息
+    forum_count = len(config.get("forum_groups", {}))
+    group_count = len(config.get("group_forums", {}))
+    
+    # 如果没有group_forums，从forum_groups计算
+    if not group_count and config.get("forum_groups"):
+        all_groups = set()
+        for groups in config["forum_groups"].values():
+            all_groups.update(groups)
+        group_count = len(all_groups)
+    
+    mode_display = get_mode_display(config.get("subscription_mode", MODE_FORUM_GROUPS))
     
     return render_template_string(
         HTML_TEMPLATE,
         config=config,
-        total_groups=len(total_groups),
+        forum_count=forum_count,
+        group_count=group_count,
+        mode_display=mode_display,
         username=session.get('username', 'root')
     )
 
@@ -953,7 +1107,6 @@ def update_settings():
         hot_reply = int(request.form.get('hot_reply', 100))
         hot_agree = int(request.form.get('hot_agree', 1000))
         
-        # 验证参数范围
         if not (60 <= check_interval <= 3600):
             flash('检查间隔必须在60-3600秒之间！', 'error')
             return redirect(url_for('index'))
@@ -1013,7 +1166,7 @@ def add_admin():
 @app.route('/remove_admin', methods=['POST'])
 @login_required
 def remove_admin():
-    """删除管理员（使用POST方法防止CSRF）"""
+    """删除管理员"""
     config = load_config()
     qq = request.form.get('qq', '').strip()
     
@@ -1033,10 +1186,38 @@ def remove_admin():
     return redirect(url_for('index'))
 
 
-@app.route('/add_forum', methods=['POST'])
+@app.route('/switch_mode', methods=['POST'])
 @login_required
-def add_forum():
-    """添加贴吧订阅"""
+def switch_mode():
+    """切换订阅模式"""
+    config = load_config()
+    mode = request.form.get('mode', '')
+    
+    if mode not in [MODE_FORUM_GROUPS, MODE_GROUP_FORUMS]:
+        flash('无效的模式！', 'error')
+        return redirect(url_for('index'))
+    
+    # 如果数据不完整，先同步
+    if not config.get("group_forums") and config.get("forum_groups"):
+        config["group_forums"] = sync_forum_to_group(config["forum_groups"])
+    elif not config.get("forum_groups") and config.get("group_forums"):
+        config["forum_groups"] = sync_group_to_forum(config["group_forums"])
+    
+    config['subscription_mode'] = mode
+    
+    if save_config(config):
+        mode_display = get_mode_display(mode)
+        flash(f'已切换到【{mode_display}】模式！', 'success')
+    else:
+        flash('模式切换失败！', 'error')
+    
+    return redirect(url_for('index'))
+
+
+@app.route('/add_subscription', methods=['POST'])
+@login_required
+def add_subscription():
+    """添加订阅"""
     config = load_config()
     forum_name = request.form.get('forum_name', '').strip()
     group_ids_str = request.form.get('group_ids', '').strip()
@@ -1046,7 +1227,7 @@ def add_forum():
         return redirect(url_for('index'))
     
     if not validate_forum_name(forum_name):
-        flash(f'贴吧名称 "{forum_name}" 格式无效！只能包含中英文、数字和下划线，长度2-20字符。', 'error')
+        flash(f'贴吧名称 "{forum_name}" 格式无效！', 'error')
         return redirect(url_for('index'))
     
     valid, group_ids, error_msg = validate_group_ids(group_ids_str)
@@ -1054,10 +1235,25 @@ def add_forum():
         flash(error_msg, 'error')
         return redirect(url_for('index'))
     
-    if 'forum_groups' not in config:
-        config['forum_groups'] = {}
+    # 初始化数据结构
+    if "forum_groups" not in config:
+        config["forum_groups"] = {}
+    if "group_forums" not in config:
+        config["group_forums"] = {}
     
-    config['forum_groups'][forum_name] = group_ids
+    # 添加订阅关系
+    for group_id in group_ids:
+        # 更新forum_groups
+        if forum_name not in config["forum_groups"]:
+            config["forum_groups"][forum_name] = []
+        if group_id not in config["forum_groups"][forum_name]:
+            config["forum_groups"][forum_name].append(group_id)
+        
+        # 更新group_forums
+        if group_id not in config["group_forums"]:
+            config["group_forums"][group_id] = []
+        if forum_name not in config["group_forums"][group_id]:
+            config["group_forums"][group_id].append(forum_name)
     
     if save_config(config):
         flash(f'贴吧 {forum_name} 订阅成功！', 'success')
@@ -1070,22 +1266,61 @@ def add_forum():
 @app.route('/remove_forum', methods=['POST'])
 @login_required
 def remove_forum():
-    """删除贴吧订阅（使用POST方法防止CSRF）"""
+    """删除贴吧订阅"""
     config = load_config()
-    name = request.form.get('name', '').strip()
+    forum = request.form.get('forum', '').strip()
     
-    if not name:
+    if not forum:
         flash('参数错误！', 'error')
         return redirect(url_for('index'))
     
-    if name in config.get('forum_groups', {}):
-        del config['forum_groups'][name]
+    if forum in config.get("forum_groups", {}):
+        # 从所有群中移除该贴吧
+        for group in config["forum_groups"][forum]:
+            if group in config.get("group_forums", {}) and forum in config["group_forums"][group]:
+                config["group_forums"][group].remove(forum)
+                if not config["group_forums"][group]:
+                    del config["group_forums"][group]
+        
+        del config["forum_groups"][forum]
+        
         if save_config(config):
-            flash(f'贴吧 {name} 已取消订阅！', 'success')
+            flash(f'贴吧 {forum} 已删除！', 'success')
         else:
-            flash('取消订阅失败！', 'error')
+            flash('删除失败！', 'error')
     else:
         flash('贴吧不存在！', 'error')
+    
+    return redirect(url_for('index'))
+
+
+@app.route('/remove_group', methods=['POST'])
+@login_required
+def remove_group():
+    """删除群订阅"""
+    config = load_config()
+    group = request.form.get('group', '').strip()
+    
+    if not group:
+        flash('参数错误！', 'error')
+        return redirect(url_for('index'))
+    
+    if group in config.get("group_forums", {}):
+        # 从所有贴吧中移除该群
+        for forum in config["group_forums"][group]:
+            if forum in config.get("forum_groups", {}) and group in config["forum_groups"][forum]:
+                config["forum_groups"][forum].remove(group)
+                if not config["forum_groups"][forum]:
+                    del config["forum_groups"][forum]
+        
+        del config["group_forums"][group]
+        
+        if save_config(config):
+            flash(f'群 {group} 的订阅已删除！', 'success')
+        else:
+            flash('删除失败！', 'error')
+    else:
+        flash('群不存在！', 'error')
     
     return redirect(url_for('index'))
 

@@ -21,6 +21,7 @@ import astrbot.core.message.components as Comp
 from ._version import __version__, __plugin_name__, __author__, __plugin_desc__
 from .tieba_client import TiebaClient
 from .tracker import HotThreadTracker
+from .subscription_manager import SubscriptionManager
 
 
 # ============ 配置常量 ============
@@ -44,6 +45,9 @@ class TiebaPlugin(Star):
         self.config_file = os.path.join(self.data_dir, "config.json")
         self.subscription_file = os.path.join(self.data_dir, "subscription.json")
 
+        # 初始化订阅管理器
+        self.sub_manager = SubscriptionManager(self.data_dir)
+
         # 加载配置
         self._load_config()
 
@@ -58,7 +62,8 @@ class TiebaPlugin(Star):
         # 文件写入锁，防止并发写入
         self._file_lock = asyncio.Lock()
 
-        logger.info(f"贴吧观察者已加载: 监控{len(self.forum_groups)}个贴吧")
+        mode_display = self.sub_manager.get_mode_display()
+        logger.info(f"贴吧观察者已加载: 监控{len(self.sub_manager.get_all_forums())}个贴吧，当前模式：{mode_display}")
 
     def _load_config(self):
         """加载配置文件"""
@@ -195,7 +200,7 @@ class TiebaPlugin(Star):
 
     def _init_scheduler(self):
         """初始化定时任务"""
-        if not self.forum_groups:
+        if not self.sub_manager.get_all_forums():
             logger.warning("没有配置任何贴吧监控")
             return
 
@@ -284,7 +289,7 @@ class TiebaPlugin(Star):
 
     async def _check_all_forums(self):
         """检查所有订阅的贴吧"""
-        for forum_name in list(self.forum_groups.keys()):
+        for forum_name in self.sub_manager.get_all_forums():
             try:
                 await self._check_forum(forum_name)
             except Exception as e:
@@ -294,7 +299,7 @@ class TiebaPlugin(Star):
 
     async def _check_forum(self, forum_name: str):
         """检查单个贴吧的新帖子"""
-        notify_groups = self.forum_groups.get(forum_name, [])
+        notify_groups = self.sub_manager.get_forum_groups(forum_name)
         if not notify_groups:
             return
 
@@ -362,7 +367,7 @@ class TiebaPlugin(Star):
 
         # 发送热帖通知
         if hot_threads:
-            notify_groups = self.forum_groups.get(forum_name, [])
+            notify_groups = self.sub_manager.get_forum_groups(forum_name)
             for hot_info in hot_threads:
                 await self._send_hot_notification(hot_info, notify_groups)
 
@@ -488,8 +493,8 @@ class TiebaPlugin(Star):
 
         sent_groups: Set[str] = set()
 
-        for forum_name in self.forum_groups:
-            groups = self.forum_groups.get(forum_name, [])
+        for forum_name in self.sub_manager.get_all_forums():
+            groups = self.sub_manager.get_forum_groups(forum_name)
 
             for group_id in groups:
                 if group_id in sent_groups:
@@ -575,9 +580,10 @@ class TiebaPlugin(Star):
 ➖ /tb退订 <贴吧名> - 取消订阅
 ➖ /tb退订 <群号> <贴吧名> - 为指定群退订
 📋 /tb列表 - 查看当前群订阅
-📋 /tb全部订阅 - 查看所有群的订阅
+📋 /tb全部订阅 - 查看所有订阅（按当前模式显示）
 🔄 /tb刷新 <贴吧名> - 手动刷新指定贴吧
 🔎 /tb检查 - 立即检查所有贴吧
+⚙️ /tb模式 [贴吧/群] - 切换订阅显示模式
 
 💡 提示: 发送 /tb帮助 查看详细说明"""
         yield event.plain_result(msg)
@@ -611,10 +617,18 @@ class TiebaPlugin(Star):
 9️⃣ /tb退订 <群号> <贴吧名> - 为指定群退订贴吧(超级管理员)
    例: /tb退订 123456789 鸣潮
 🔟 /tb列表 - 查看当前群订阅的所有贴吧
-1️⃣1️⃣ /tb全部订阅 - 查看所有群的订阅情况(超级管理员)
+1️⃣1️⃣ /tb全部订阅 - 查看所有订阅情况(按当前模式显示)
 1️⃣2️⃣ /tb刷新 <贴吧名> - 手动刷新指定贴吧的最新帖子
    例: /tb刷新 鸣潮
-1️⃣3️⃣ /tb检查 - 立即检查所有订阅的贴吧"""
+1️⃣3️⃣ /tb检查 - 立即检查所有订阅的贴吧
+1️⃣4️⃣ /tb模式 [贴吧/群] - 切换订阅显示模式
+   例: /tb模式 - 查看当前模式
+   例: /tb模式 贴吧 - 切换到贴吧对应群模式
+   例: /tb模式 群 - 切换到群对应贴吧模式
+
+【订阅模式说明】
+• 贴吧对应群模式: 显示每个贴吧推送到哪些群
+• 群对应贴吧模式: 显示每个群订阅了哪些贴吧"""
         yield event.plain_result(msg)
 
     @filter.command("tb统计")
@@ -845,20 +859,17 @@ class TiebaPlugin(Star):
                 yield event.plain_result("❌ 该命令只能在群聊中使用，或在命令中指定群号")
                 return
 
-        if forum_name not in self.forum_groups:
-            self.forum_groups[forum_name] = []
-
-        if group_id in self.forum_groups[forum_name]:
+        # 使用订阅管理器
+        if self.sub_manager.is_subscribed(forum_name, group_id):
             yield event.plain_result(f"⚠️ 群{group_id}已订阅【{forum_name}吧】")
             return
 
-        self.forum_groups[forum_name].append(group_id)
-        await self._save_subscription_async()
-
-        # 重新初始化定时任务
-        self._init_scheduler()
-
-        yield event.plain_result(f"✅ 成功为群{group_id}订阅【{forum_name}吧】\n新帖子将推送到该群")
+        if self.sub_manager.subscribe(forum_name, group_id):
+            # 重新初始化定时任务
+            self._init_scheduler()
+            yield event.plain_result(f"✅ 成功为群{group_id}订阅【{forum_name}吧】\n新帖子将推送到该群")
+        else:
+            yield event.plain_result("❌ 订阅失败，请检查日志")
 
     @filter.command("tb退订")
     async def cmd_unsubscribe(self, event: AstrMessageEvent, arg1: str = "", arg2: str = ""):
@@ -882,22 +893,14 @@ class TiebaPlugin(Star):
                 yield event.plain_result("❌ 该命令只能在群聊中使用，或在命令中指定群号")
                 return
 
-        if forum_name not in self.forum_groups:
-            yield event.plain_result(f"❌ 【{forum_name}吧】未被监控")
-            return
-
-        if group_id not in self.forum_groups[forum_name]:
+        if not self.sub_manager.is_subscribed(forum_name, group_id):
             yield event.plain_result(f"⚠️ 群{group_id}未订阅【{forum_name}吧】")
             return
 
-        self.forum_groups[forum_name].remove(group_id)
-
-        # 如果没有群组订阅，删除该贴吧
-        if not self.forum_groups[forum_name]:
-            del self.forum_groups[forum_name]
-
-        await self._save_subscription_async()
-        yield event.plain_result(f"✅ 已取消群{group_id}对【{forum_name}吧】的订阅")
+        if self.sub_manager.unsubscribe(forum_name, group_id):
+            yield event.plain_result(f"✅ 已取消群{group_id}对【{forum_name}吧】的订阅")
+        else:
+            yield event.plain_result("❌ 退订失败，请检查日志")
 
     @filter.command("tb列表")
     async def cmd_list(self, event: AstrMessageEvent):
@@ -911,10 +914,7 @@ class TiebaPlugin(Star):
             yield event.plain_result("❌ 该命令只能在群聊中使用")
             return
 
-        subscribed = []
-        for name, groups in self.forum_groups.items():
-            if group_id in groups:
-                subscribed.append(name)
+        subscribed = self.sub_manager.get_group_forums(group_id)
 
         if not subscribed:
             yield event.plain_result("📭 本群暂无订阅任何贴吧")
@@ -937,26 +937,72 @@ class TiebaPlugin(Star):
             yield event.plain_result("⚠️ 只有管理员可以使用此命令")
             return
 
-        if not self.forum_groups:
+        all_forums = self.sub_manager.get_all_forums()
+        if not all_forums:
             yield event.plain_result("📭 暂无订阅任何贴吧")
             return
 
         lines = []
-        lines.append("📋 全部订阅情况")
+        lines.append(f"📋 全部订阅情况 (当前模式: {self.sub_manager.get_mode_display()})")
         lines.append("=" * 30)
 
-        for forum_name, groups in sorted(self.forum_groups.items()):
-            lines.append(f"\n【{forum_name}吧】")
-            if groups:
-                for i, group_id in enumerate(groups, 1):
-                    lines.append(f"  {i}. 群{group_id}")
-            else:
-                lines.append("  暂无群订阅")
-
-        lines.append("\n" + "=" * 30)
-        lines.append(f"总计: {len(self.forum_groups)}个贴吧")
+        # 根据当前模式选择展示方式
+        if self.sub_manager.mode == self.sub_manager.MODE_FORUM_GROUPS:
+            # 贴吧对应群模式
+            for forum_name in sorted(all_forums):
+                groups = self.sub_manager.get_forum_groups(forum_name)
+                lines.append(f"\n【{forum_name}吧】")
+                if groups:
+                    for i, group_id in enumerate(groups, 1):
+                        lines.append(f"  {i}. 群{group_id}")
+                else:
+                    lines.append("  暂无群订阅")
+            lines.append("\n" + "=" * 30)
+            lines.append(f"总计: {len(all_forums)}个贴吧")
+        else:
+            # 群对应贴吧模式
+            all_groups = self.sub_manager.get_all_groups()
+            for group_id in sorted(all_groups):
+                forums = self.sub_manager.get_group_forums(group_id)
+                lines.append(f"\n【群{group_id}】")
+                if forums:
+                    for i, forum_name in enumerate(forums, 1):
+                        lines.append(f"  {i}. {forum_name}吧")
+                else:
+                    lines.append("  暂无贴吧订阅")
+            lines.append("\n" + "=" * 30)
+            lines.append(f"总计: {len(all_groups)}个群")
 
         yield event.plain_result("\n".join(lines))
+
+    @filter.command("tb模式")
+    async def cmd_mode(self, event: AstrMessageEvent, mode: str = ""):
+        """切换订阅显示模式
+        用法: /tb模式 - 查看当前模式
+              /tb模式 贴吧 - 切换到贴吧对应群模式
+              /tb模式 群 - 切换到群对应贴吧模式
+        """
+        if not self._is_admin(event):
+            yield event.plain_result("⚠️ 只有管理员可以使用此命令")
+            return
+
+        if not mode:
+            current = self.sub_manager.get_mode_display()
+            yield event.plain_result(f"📊 当前订阅模式: {current}\n\n可用模式:\n• 贴吧 - 贴吧对应群\n• 群 - 群对应贴吧")
+            return
+
+        if mode in ["贴吧", "forum", "forums"]:
+            if self.sub_manager.set_mode(self.sub_manager.MODE_FORUM_GROUPS):
+                yield event.plain_result("✅ 已切换到【贴吧对应群】模式\n使用 /tb全部订阅 查看效果")
+            else:
+                yield event.plain_result("❌ 模式切换失败")
+        elif mode in ["群", "group", "groups"]:
+            if self.sub_manager.set_mode(self.sub_manager.MODE_GROUP_FORUMS):
+                yield event.plain_result("✅ 已切换到【群对应贴吧】模式\n使用 /tb全部订阅 查看效果")
+            else:
+                yield event.plain_result("❌ 模式切换失败")
+        else:
+            yield event.plain_result("❌ 无效的模式\n可用: 贴吧 / 群")
 
     @filter.command("tb刷新")
     async def cmd_refresh(self, event: AstrMessageEvent, forum_name: str = ""):
@@ -975,7 +1021,7 @@ class TiebaPlugin(Star):
             return
 
         # 检查是否订阅
-        if forum_name not in self.forum_groups or group_id not in self.forum_groups.get(forum_name, []):
+        if not self.sub_manager.is_subscribed(forum_name, group_id):
             yield event.plain_result(f"❌ 本群未订阅【{forum_name}吧】")
             return
 
@@ -1003,11 +1049,11 @@ class TiebaPlugin(Star):
             yield event.plain_result("⚠️ 只有管理员可以使用此命令")
             return
 
-        if not self.forum_groups:
+        forums = self.sub_manager.get_all_forums()
+        if not forums:
             yield event.plain_result("❌ 未配置任何贴吧监控")
             return
 
-        forums = list(self.forum_groups.keys())
         yield event.plain_result(f"🔎 开始检查所有贴吧（共{len(forums)}个）...")
 
         try:
