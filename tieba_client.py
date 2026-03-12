@@ -39,13 +39,14 @@ class TiebaClient:
         pattern = re.compile(r'^https?://[^\s<>"{}|\\^`\[\]]+$')
         return bool(pattern.match(url))
 
-    async def get_threads(self, forum_name: str, retry: int = 3) -> List[Dict]:
+    async def get_threads(self, forum_name: str, retry: int = 3, timeout: int = 30) -> List[Dict]:
         """
         获取贴吧的最新帖子
 
         Args:
             forum_name: 贴吧名称
             retry: 重试次数
+            timeout: 超时时间（秒）
 
         Returns:
             帖子列表
@@ -57,10 +58,10 @@ class TiebaClient:
             try:
                 client = await self._get_client()
 
-                # 获取帖子，按创建时间排序
-                raw_threads = await client.get_threads(
-                    forum_name,
-                    sort=aiotieba.ThreadSortType.CREATE
+                # 获取帖子，按创建时间排序，添加超时控制
+                raw_threads = await asyncio.wait_for(
+                    client.get_threads(forum_name, sort=aiotieba.ThreadSortType.CREATE),
+                    timeout=timeout
                 )
 
                 if raw_threads:
@@ -86,6 +87,11 @@ class TiebaClient:
                         )
                         await asyncio.sleep(delay)
 
+            except asyncio.TimeoutError:
+                attempt += 1
+                logger.error(f"获取贴吧[{forum_name}]帖子超时(尝试{attempt}/{retry})")
+                if attempt < retry:
+                    await asyncio.sleep(random.uniform(2, 5))
             except aiotieba.TiebaError as e:
                 attempt += 1
                 logger.error(f"aiotieba错误 - 获取贴吧[{forum_name}]帖子失败(尝试{attempt}/{retry}): {e}")

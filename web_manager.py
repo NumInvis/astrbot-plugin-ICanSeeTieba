@@ -3,51 +3,79 @@
 用于可视化配置贴吧监控
 """
 
+import hashlib
 import json
 import os
+import secrets
 from datetime import datetime
 from functools import wraps
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
 
 from flask import Flask, render_template_string, request, redirect, url_for, flash, session
+from filelock import FileLock
 
 app = Flask(__name__)
-app.secret_key = 'tieba_manager_secret_key_change_in_production'
+# 使用随机生成的secret_key，优先从环境变量读取
+app.secret_key = os.environ.get('FLASK_SECRET_KEY') or secrets.token_hex(32)
 
 # 数据目录
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 USER_FILE = os.path.join(DATA_DIR, "user.json")
+CONFIG_LOCK = FileLock(os.path.join(DATA_DIR, "config.lock"))
+USER_LOCK = FileLock(os.path.join(DATA_DIR, "user.lock"))
 
 # 默认账号
 DEFAULT_USERNAME = "root"
 DEFAULT_PASSWORD = "moning"
 
 
+def hash_password(password: str, salt: Optional[str] = None) -> Tuple[str, str]:
+    """使用PBKDF2哈希密码"""
+    if salt is None:
+        salt = secrets.token_hex(16)
+    hashed = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt.encode('utf-8'), 100000)
+    return salt, hashed.hex()
+
+
+def verify_password(password: str, salt: str, hashed: str) -> bool:
+    """验证密码"""
+    _, new_hash = hash_password(password, salt)
+    return secrets.compare_digest(new_hash, hashed)
+
+
 def load_user_config() -> Dict:
     """加载用户配置"""
-    if os.path.exists(USER_FILE):
-        try:
-            with open(USER_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {
+    with USER_LOCK:
+        if os.path.exists(USER_FILE):
+            try:
+                with open(USER_FILE, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception:
+                pass
+    
+    # 首次使用，创建默认配置（密码已哈希）
+    salt, hashed = hash_password(DEFAULT_PASSWORD)
+    default_config = {
         "username": DEFAULT_USERNAME,
-        "password": DEFAULT_PASSWORD,
+        "password_salt": salt,
+        "password_hash": hashed,
         "first_login": True
     }
+    save_user_config(default_config)
+    return default_config
 
 
 def save_user_config(config: Dict):
     """保存用户配置"""
-    try:
-        with open(USER_FILE, 'w', encoding='utf-8') as f:
-            json.dump(config, f, ensure_ascii=False, indent=4)
-        return True
-    except Exception as e:
-        print(f"保存用户配置失败: {e}")
-        return False
+    with USER_LOCK:
+        try:
+            with open(USER_FILE, 'w', encoding='utf-8') as f:
+                json.dump(config, f, ensure_ascii=False, indent=4)
+            return True
+        except Exception as e:
+            print(f"保存用户配置失败: {e}")
+            return False
 
 
 def login_required(f):
@@ -62,12 +90,14 @@ def login_required(f):
 
 def load_config() -> Dict:
     """加载配置"""
-    if os.path.exists(CONFIG_FILE):
-        try:
-            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except Exception as e:
-            print(f"加载配置失败: {e}")
+    with CONFIG_LOCK:
+        if os.path.exists(CONFIG_FILE):
+            try:
+                with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception as e:
+                print(f"加载配置失败: {e}")
+    
     return {
         "check_interval_seconds": 240,
         "threads_to_retrieve": 6,
@@ -80,13 +110,53 @@ def load_config() -> Dict:
 
 def save_config(config: Dict):
     """保存配置"""
-    try:
-        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-            json.dump(config, f, ensure_ascii=False, indent=4)
-        return True
-    except Exception as e:
-        print(f"保存配置失败: {e}")
-        return False
+    with CONFIG_LOCK:
+        try:
+            with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+                json.dump(config, f, ensure_ascii=False, indent=4)
+            return True
+        except Exception as e:
+            print(f"保存配置失败: {e}")
+            return False
+
+
+def validate_forum_name(name: str) -> bool:
+    """验证贴吧名称格式"""
+    import re
+    # 贴吧名通常为中英文数字，2-20字符
+    return bool(re.match(r'^[\u4e00-\u9fa5a-zA-Z0-9_]{2,20}$', name))
+
+
+def validate_qq(qq: str) -> bool:
+    """验证QQ号格式"""
+    import re
+    # QQ号为5-11位数字
+    return bool(re.match(r'^\d{5,11}$', qq))
+
+
+def validate_group_ids(group_ids_str: str) -> Tuple[bool, List[str], str]:
+    """验证群号列表
+    
+    Returns:
+        (是否有效, 群号列表, 错误信息)
+    """
+    if not group_ids_str:
+        return False, [], "群号不能为空"
+    
+    group_ids = [g.strip() for g in group_ids_str.split(',') if g.strip()]
+    
+    if not group_ids:
+        return False, [], "群号不能为空"
+    
+    invalid_groups = []
+    for gid in group_ids:
+        if not validate_qq(gid):
+            invalid_groups.append(gid)
+    
+    if invalid_groups:
+        return False, [], f"无效的群号: {', '.join(invalid_groups)}"
+    
+    return True, group_ids, ""
 
 
 LOGIN_TEMPLATE = """
@@ -358,11 +428,11 @@ CHANGE_PASSWORD_TEMPLATE = """
             </div>
             <div class="form-group">
                 <label>新密码</label>
-                <input type="password" name="new_password" required>
+                <input type="password" name="new_password" required minlength="6">
             </div>
             <div class="form-group">
                 <label>确认新密码</label>
-                <input type="password" name="confirm_password" required>
+                <input type="password" name="confirm_password" required minlength="6">
             </div>
             <button type="submit" class="btn btn-primary">修改密码</button>
             <a href="{{ url_for('logout') }}" class="btn btn-secondary" style="display: inline-block; text-align: center; text-decoration: none;">退出登录</a>
@@ -595,6 +665,9 @@ HTML_TEMPLATE = """
             grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
             gap: 15px;
         }
+        .delete-form {
+            display: inline;
+        }
     </style>
 </head>
 <body>
@@ -651,7 +724,7 @@ HTML_TEMPLATE = """
                     <div class="form-row">
                         <div class="form-group">
                             <label>检查间隔（秒）</label>
-                            <input type="number" name="check_interval" value="{{ config.check_interval_seconds }}" min="60">
+                            <input type="number" name="check_interval" value="{{ config.check_interval_seconds }}" min="60" max="3600">
                         </div>
                         <div class="form-group">
                             <label>获取帖子数</label>
@@ -661,11 +734,11 @@ HTML_TEMPLATE = """
                     <div class="form-row">
                         <div class="form-group">
                             <label>热帖回复阈值</label>
-                            <input type="number" name="hot_reply" value="{{ config.hot_reply_threshold }}" min="1">
+                            <input type="number" name="hot_reply" value="{{ config.hot_reply_threshold }}" min="1" max="10000">
                         </div>
                         <div class="form-group">
                             <label>热帖点赞阈值</label>
-                            <input type="number" name="hot_agree" value="{{ config.hot_agree_threshold }}" min="1">
+                            <input type="number" name="hot_agree" value="{{ config.hot_agree_threshold }}" min="1" max="50000">
                         </div>
                     </div>
                     <button type="submit" class="btn btn-primary">保存配置</button>
@@ -678,7 +751,7 @@ HTML_TEMPLATE = """
                 <form method="POST" action="{{ url_for('add_admin') }}" style="margin-bottom: 20px;">
                     <div class="form-group">
                         <label>添加管理员QQ</label>
-                        <input type="text" name="admin_qq" placeholder="输入QQ号码" required>
+                        <input type="text" name="admin_qq" placeholder="输入QQ号码" required pattern="\\d{5,11}">
                     </div>
                     <button type="submit" class="btn btn-success">添加</button>
                 </form>
@@ -688,7 +761,10 @@ HTML_TEMPLATE = """
                         {% for admin in config.admin_users %}
                             <span class="admin-tag">
                                 {{ admin }}
-                                <a href="{{ url_for('remove_admin', qq=admin) }}" style="color: white; text-decoration: none;">×</a>
+                                <form method="POST" action="{{ url_for('remove_admin') }}" class="delete-form" onsubmit="return confirm('确定要删除管理员 {{ admin }} 吗？');">
+                                    <input type="hidden" name="qq" value="{{ admin }}">
+                                    <button type="submit" style="background: none; border: none; color: white; cursor: pointer; font-size: 16px;">×</button>
+                                </form>
                             </span>
                         {% endfor %}
                     </div>
@@ -705,11 +781,11 @@ HTML_TEMPLATE = """
                 <div class="grid" style="grid-template-columns: 2fr 2fr 1fr; align-items: end;">
                     <div class="form-group">
                         <label>贴吧名称</label>
-                        <input type="text" name="forum_name" placeholder="例如：鸣潮" required>
+                        <input type="text" name="forum_name" placeholder="例如：鸣潮" required pattern="[\\u4e00-\\u9fa5a-zA-Z0-9_]{2,20}">
                     </div>
                     <div class="form-group">
                         <label>推送群号（多个用逗号分隔）</label>
-                        <input type="text" name="group_ids" placeholder="例如：1087074883,661278084" required>
+                        <input type="text" name="group_ids" placeholder="例如：1087074883,661278084" required pattern="[\\d,]+">
                     </div>
                     <div class="form-group">
                         <button type="submit" class="btn btn-success" style="width: 100%;">添加订阅</button>
@@ -729,7 +805,10 @@ HTML_TEMPLATE = """
                                     {% endfor %}
                                 </div>
                             </div>
-                            <a href="{{ url_for('remove_forum', name=forum) }}" class="btn btn-danger">删除</a>
+                            <form method="POST" action="{{ url_for('remove_forum') }}" class="delete-form" onsubmit="return confirm('确定要删除贴吧 {{ forum }} 的订阅吗？');">
+                                <input type="hidden" name="name" value="{{ forum }}">
+                                <button type="submit" class="btn btn-danger">删除</button>
+                            </form>
                         </div>
                     </div>
                 {% endfor %}
@@ -756,18 +835,34 @@ def login():
         username = request.form.get('username', '').strip()
         password = request.form.get('password', '').strip()
         
-        if username == user_config['username'] and password == user_config['password']:
-            session['logged_in'] = True
-            session['username'] = username
+        # 验证用户名和密码
+        if username == user_config['username']:
+            # 兼容旧版本明文密码
+            if 'password_hash' in user_config:
+                password_valid = verify_password(password, user_config['password_salt'], user_config['password_hash'])
+            else:
+                # 旧版本明文密码
+                password_valid = (password == user_config.get('password', ''))
+                if password_valid:
+                    # 迁移到哈希存储
+                    salt, hashed = hash_password(password)
+                    user_config['password_salt'] = salt
+                    user_config['password_hash'] = hashed
+                    del user_config['password']
+                    save_user_config(user_config)
             
-            if user_config.get('first_login', True):
-                flash('首次登录，请修改默认密码！', 'warning')
-                return redirect(url_for('change_password'))
-            
-            flash('登录成功！', 'success')
-            return redirect(url_for('index'))
-        else:
-            flash('用户名或密码错误！', 'error')
+            if password_valid:
+                session['logged_in'] = True
+                session['username'] = username
+                
+                if user_config.get('first_login', True):
+                    flash('首次登录，请修改默认密码！', 'warning')
+                    return redirect(url_for('change_password'))
+                
+                flash('登录成功！', 'success')
+                return redirect(url_for('index'))
+        
+        flash('用户名或密码错误！', 'error')
     
     return render_template_string(
         LOGIN_TEMPLATE,
@@ -794,14 +889,28 @@ def change_password():
         new_password = request.form.get('new_password', '').strip()
         confirm_password = request.form.get('confirm_password', '').strip()
         
-        if current_password != user_config['password']:
+        # 验证当前密码
+        if 'password_hash' in user_config:
+            current_valid = verify_password(current_password, user_config['password_salt'], user_config['password_hash'])
+        else:
+            current_valid = (current_password == user_config.get('password', ''))
+        
+        if not current_valid:
             flash('当前密码错误！', 'error')
         elif new_password != confirm_password:
             flash('两次输入的新密码不一致！', 'error')
-        elif len(new_password) < 4:
-            flash('新密码长度至少4位！', 'error')
+        elif len(new_password) < 6:
+            flash('新密码长度至少6位！', 'error')
+        elif new_password == DEFAULT_PASSWORD:
+            flash('不能使用默认密码，请设置其他密码！', 'error')
         else:
-            user_config['password'] = new_password
+            # 使用哈希存储新密码
+            salt, hashed = hash_password(new_password)
+            user_config['password_salt'] = salt
+            user_config['password_hash'] = hashed
+            # 删除旧版本明文密码字段
+            if 'password' in user_config:
+                del user_config['password']
             user_config['first_login'] = False
             
             if save_user_config(user_config):
@@ -839,15 +948,31 @@ def update_settings():
     config = load_config()
     
     try:
-        config['check_interval_seconds'] = int(request.form.get('check_interval', 240))
-        config['threads_to_retrieve'] = int(request.form.get('threads_count', 6))
-        config['hot_reply_threshold'] = int(request.form.get('hot_reply', 100))
-        config['hot_agree_threshold'] = int(request.form.get('hot_agree', 1000))
+        check_interval = int(request.form.get('check_interval', 240))
+        threads_count = int(request.form.get('threads_count', 6))
+        hot_reply = int(request.form.get('hot_reply', 100))
+        hot_agree = int(request.form.get('hot_agree', 1000))
+        
+        # 验证参数范围
+        if not (60 <= check_interval <= 3600):
+            flash('检查间隔必须在60-3600秒之间！', 'error')
+            return redirect(url_for('index'))
+        
+        if not (1 <= threads_count <= 20):
+            flash('获取帖子数必须在1-20之间！', 'error')
+            return redirect(url_for('index'))
+        
+        config['check_interval_seconds'] = check_interval
+        config['threads_to_retrieve'] = threads_count
+        config['hot_reply_threshold'] = hot_reply
+        config['hot_agree_threshold'] = hot_agree
         
         if save_config(config):
             flash('配置保存成功！', 'success')
         else:
             flash('配置保存失败！', 'error')
+    except ValueError:
+        flash('配置参数格式错误！', 'error')
     except Exception as e:
         flash(f'配置保存失败：{e}', 'error')
     
@@ -861,27 +986,40 @@ def add_admin():
     config = load_config()
     admin_qq = request.form.get('admin_qq', '').strip()
     
-    if admin_qq:
-        if 'admin_users' not in config:
-            config['admin_users'] = []
-        
-        if admin_qq not in config['admin_users']:
-            config['admin_users'].append(admin_qq)
-            if save_config(config):
-                flash(f'管理员 {admin_qq} 添加成功！', 'success')
-            else:
-                flash('添加失败！', 'error')
-        else:
-            flash('该管理员已存在！', 'error')
+    if not admin_qq:
+        flash('QQ号不能为空！', 'error')
+        return redirect(url_for('index'))
+    
+    if not validate_qq(admin_qq):
+        flash(f'QQ号 {admin_qq} 格式无效！', 'error')
+        return redirect(url_for('index'))
+    
+    if 'admin_users' not in config:
+        config['admin_users'] = []
+    
+    if admin_qq in config['admin_users']:
+        flash('该管理员已存在！', 'error')
+        return redirect(url_for('index'))
+    
+    config['admin_users'].append(admin_qq)
+    if save_config(config):
+        flash(f'管理员 {admin_qq} 添加成功！', 'success')
+    else:
+        flash('添加失败！', 'error')
     
     return redirect(url_for('index'))
 
 
-@app.route('/remove_admin/<qq>')
+@app.route('/remove_admin', methods=['POST'])
 @login_required
-def remove_admin(qq):
-    """删除管理员"""
+def remove_admin():
+    """删除管理员（使用POST方法防止CSRF）"""
     config = load_config()
+    qq = request.form.get('qq', '').strip()
+    
+    if not qq:
+        flash('参数错误！', 'error')
+        return redirect(url_for('index'))
     
     if qq in config.get('admin_users', []):
         config['admin_users'].remove(qq)
@@ -889,6 +1027,8 @@ def remove_admin(qq):
             flash(f'管理员 {qq} 已删除！', 'success')
         else:
             flash('删除失败！', 'error')
+    else:
+        flash('管理员不存在！', 'error')
     
     return redirect(url_for('index'))
 
@@ -901,28 +1041,42 @@ def add_forum():
     forum_name = request.form.get('forum_name', '').strip()
     group_ids_str = request.form.get('group_ids', '').strip()
     
-    if forum_name and group_ids_str:
-        # 解析群号
-        group_ids = [g.strip() for g in group_ids_str.split(',') if g.strip()]
-        
-        if 'forum_groups' not in config:
-            config['forum_groups'] = {}
-        
-        config['forum_groups'][forum_name] = group_ids
-        
-        if save_config(config):
-            flash(f'贴吧 {forum_name} 订阅成功！', 'success')
-        else:
-            flash('订阅失败！', 'error')
+    if not forum_name:
+        flash('贴吧名称不能为空！', 'error')
+        return redirect(url_for('index'))
+    
+    if not validate_forum_name(forum_name):
+        flash(f'贴吧名称 "{forum_name}" 格式无效！只能包含中英文、数字和下划线，长度2-20字符。', 'error')
+        return redirect(url_for('index'))
+    
+    valid, group_ids, error_msg = validate_group_ids(group_ids_str)
+    if not valid:
+        flash(error_msg, 'error')
+        return redirect(url_for('index'))
+    
+    if 'forum_groups' not in config:
+        config['forum_groups'] = {}
+    
+    config['forum_groups'][forum_name] = group_ids
+    
+    if save_config(config):
+        flash(f'贴吧 {forum_name} 订阅成功！', 'success')
+    else:
+        flash('订阅失败！', 'error')
     
     return redirect(url_for('index'))
 
 
-@app.route('/remove_forum/<name>')
+@app.route('/remove_forum', methods=['POST'])
 @login_required
-def remove_forum(name):
-    """删除贴吧订阅"""
+def remove_forum():
+    """删除贴吧订阅（使用POST方法防止CSRF）"""
     config = load_config()
+    name = request.form.get('name', '').strip()
+    
+    if not name:
+        flash('参数错误！', 'error')
+        return redirect(url_for('index'))
     
     if name in config.get('forum_groups', {}):
         del config['forum_groups'][name]
@@ -930,6 +1084,8 @@ def remove_forum(name):
             flash(f'贴吧 {name} 已取消订阅！', 'success')
         else:
             flash('取消订阅失败！', 'error')
+    else:
+        flash('贴吧不存在！', 'error')
     
     return redirect(url_for('index'))
 

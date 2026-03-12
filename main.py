@@ -717,6 +717,7 @@ class TiebaPlugin(Star):
         try:
             limit_num = int(limit)
         except ValueError:
+            yield event.plain_result(f"⚠️ 数量参数'{limit}'无效，使用默认值5")
             limit_num = 5
 
         limit_num = min(max(limit_num, 1), 20)

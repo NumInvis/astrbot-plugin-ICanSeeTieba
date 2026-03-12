@@ -223,7 +223,25 @@ class HotThreadTracker:
         Returns:
             热帖列表
         """
+        # 清理过期热帖数据
+        self._cleanup_old_hot_threads()
+        
         threads = list(self.hot_threads.values())
         # 按最后更新时间排序
         threads.sort(key=lambda x: x.get("last_update", ""), reverse=True)
         return threads[:limit]
+    
+    def _cleanup_old_hot_threads(self, max_age_days: int = 30):
+        """清理过期热帖数据
+        
+        Args:
+            max_age_days: 最大保留天数
+        """
+        cutoff = (datetime.now() - timedelta(days=max_age_days)).strftime("%Y-%m-%d %H:%M:%S")
+        to_remove = [k for k, v in self.hot_threads.items() 
+                     if v.get("last_update", "") < cutoff]
+        for k in to_remove:
+            del self.hot_threads[k]
+        if to_remove:
+            self._save_hot_threads()
+            logger.info(f"清理了 {len(to_remove)} 条过期热帖数据")
