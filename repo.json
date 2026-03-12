@@ -1,0 +1,9 @@
+{
+    "name": "astrbot_plugin_ICanSeeTieba",
+    "display_name": "贴吧观察者",
+    "description": "实时监控贴吧新帖、热帖预警、多群推送，支持 Web 管理界面",
+    "author": "NumInvis",
+    "social_link": "https://github.com/NumInvis",
+    "repository": "https://github.com/NumInvis/astrbot-plugin-ICanSeeTieba",
+    "tags": ["贴吧", "web", "监控", "社区"]
+}
