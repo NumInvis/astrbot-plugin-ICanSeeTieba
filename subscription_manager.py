@@ -53,7 +53,7 @@ class SubscriptionManager:
                     elif not self._forum_groups and self._group_forums:
                         self._sync_to_forum_groups()
                     
-                except Exception as e:
+                except (json.JSONDecodeError, IOError, OSError) as e:
                     print(f"加载订阅配置失败: {e}")
     
     def _save(self):
@@ -74,7 +74,7 @@ class SubscriptionManager:
                 with open(self.config_file, 'w', encoding='utf-8') as f:
                     json.dump(config, f, ensure_ascii=False, indent=4)
                 return True
-            except Exception as e:
+            except (IOError, OSError, TypeError) as e:
                 print(f"保存订阅配置失败: {e}")
                 return False
     

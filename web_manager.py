@@ -15,12 +15,26 @@ from typing import Dict, List, Optional, Tuple
 from flask import Flask, render_template_string, request, redirect, url_for, flash, session
 from filelock import FileLock
 
-app = Flask(__name__)
-# 使用随机生成的secret_key，优先从环境变量读取
-app.secret_key = os.environ.get('FLASK_SECRET_KEY') or secrets.token_hex(32)
+from astrbot.api.star import StarTools
 
-# 数据目录
-DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+# 数据目录（必须在app配置之前定义）
+DATA_DIR = str(StarTools.get_data_dir("astrbot_plugin_ICanSeeTieba"))
+os.makedirs(DATA_DIR, exist_ok=True)
+
+app = Flask(__name__)
+# 使用固定的secret_key（从文件读取或生成）
+SECRET_KEY_FILE = os.path.join(DATA_DIR, ".secret_key")
+if os.path.exists(SECRET_KEY_FILE):
+    with open(SECRET_KEY_FILE, 'r') as f:
+        app.secret_key = f.read().strip()
+else:
+    app.secret_key = secrets.token_hex(32)
+    with open(SECRET_KEY_FILE, 'w') as f:
+        f.write(app.secret_key)
+
+# 配置session
+app.config['SESSION_TYPE'] = 'filesystem'
+app.config['PERMANENT_SESSION_LIFETIME'] = 1800  # 30分钟
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 USER_FILE = os.path.join(DATA_DIR, "user.json")
 CONFIG_LOCK = FileLock(os.path.join(DATA_DIR, "config.lock"))
@@ -56,7 +70,7 @@ def load_user_config() -> Dict:
             try:
                 with open(USER_FILE, 'r', encoding='utf-8') as f:
                     return json.load(f)
-            except Exception:
+            except (json.JSONDecodeError, IOError, OSError):
                 pass
     
     # 首次使用，创建默认配置（密码已哈希）
@@ -78,16 +92,17 @@ def save_user_config(config: Dict):
             with open(USER_FILE, 'w', encoding='utf-8') as f:
                 json.dump(config, f, ensure_ascii=False, indent=4)
             return True
-        except Exception as e:
+        except (IOError, OSError, TypeError) as e:
             print(f"保存用户配置失败: {e}")
             return False
 
 
 def login_required(f):
-    """登录验证装饰器"""
+    """登录验证装饰器 - 强制登录"""
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        if 'logged_in' not in session:
+        # 严格检查登录状态
+        if not session.get('logged_in'):
             return redirect(url_for('login'))
         return f(*args, **kwargs)
     return decorated_function
@@ -100,7 +115,7 @@ def load_config() -> Dict:
             try:
                 with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                     return json.load(f)
-            except Exception as e:
+            except (json.JSONDecodeError, IOError, OSError) as e:
                 print(f"加载配置失败: {e}")
     
     return {
@@ -122,7 +137,7 @@ def save_config(config: Dict):
             with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
                 json.dump(config, f, ensure_ascii=False, indent=4)
             return True
-        except Exception as e:
+        except (IOError, OSError, TypeError) as e:
             print(f"保存配置失败: {e}")
             return False
 
@@ -1000,8 +1015,10 @@ def login():
                     save_user_config(user_config)
             
             if password_valid:
+                session.clear()  # 清除旧session
                 session['logged_in'] = True
                 session['username'] = username
+                session['last_activity'] = datetime.now().isoformat()  # 设置活动时间
                 
                 if user_config.get('first_login', True):
                     flash('首次登录，请修改默认密码！', 'warning')
@@ -1127,7 +1144,7 @@ def update_settings():
             flash('配置保存失败！', 'error')
     except ValueError:
         flash('配置参数格式错误！', 'error')
-    except Exception as e:
+    except (IOError, OSError, TypeError) as e:
         flash(f'配置保存失败：{e}', 'error')
     
     return redirect(url_for('index'))

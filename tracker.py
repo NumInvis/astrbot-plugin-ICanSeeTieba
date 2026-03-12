@@ -32,22 +32,28 @@ class HotThreadTracker:
             try:
                 with open(self.hot_threads_file, 'r', encoding='utf-8') as f:
                     return json.load(f)
-            except Exception as e:
+            except (json.JSONDecodeError, IOError, OSError) as e:
                 logger.error(f"加载热帖数据失败: {e}")
         return {}
     
     def _load_stats(self) -> Dict:
         """加载统计数据"""
-        if os.path.exists(self.stats_file):
-            try:
-                with open(self.stats_file, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-            except Exception as e:
-                logger.error(f"加载统计数据失败: {e}")
-        return {
+        default_stats = {
             "daily_posts": {},
             "forum_activity": {}
         }
+        if os.path.exists(self.stats_file):
+            try:
+                with open(self.stats_file, 'r', encoding='utf-8') as f:
+                    loaded = json.load(f)
+                    # 确保返回的数据结构完整
+                    for key in default_stats:
+                        if key not in loaded:
+                            loaded[key] = default_stats[key]
+                    return loaded
+            except (json.JSONDecodeError, IOError, OSError) as e:
+                logger.error(f"加载统计数据失败: {e}")
+        return default_stats
     
     def _save_hot_threads(self):
         """保存热帖数据"""
@@ -55,16 +61,16 @@ class HotThreadTracker:
             os.makedirs(self.data_dir, exist_ok=True)
             with open(self.hot_threads_file, 'w', encoding='utf-8') as f:
                 json.dump(self.hot_threads, f, ensure_ascii=False, indent=4)
-        except Exception as e:
+        except (IOError, OSError, TypeError) as e:
             logger.error(f"保存热帖数据失败: {e}")
-    
+
     def _save_stats(self):
         """保存统计数据"""
         try:
             os.makedirs(self.data_dir, exist_ok=True)
             with open(self.stats_file, 'w', encoding='utf-8') as f:
                 json.dump(self.stats, f, ensure_ascii=False, indent=4)
-        except Exception as e:
+        except (IOError, OSError, TypeError) as e:
             logger.error(f"保存统计数据失败: {e}")
     
     def check_hot_thread(
@@ -180,7 +186,28 @@ class HotThreadTracker:
         self.stats["forum_activity"][tieba_name]["last_post"] = today
         
         self._save_stats()
-    
+
+    def update_forum_activity(self, tieba_name: str):
+        """
+        更新贴吧活跃度（仅更新最后访问时间，不增加计数）
+
+        Args:
+            tieba_name: 贴吧名称
+        """
+        today = datetime.now().strftime("%Y-%m-%d")
+
+        # 更新贴吧活跃度
+        if tieba_name not in self.stats["forum_activity"]:
+            self.stats["forum_activity"][tieba_name] = {
+                "total_posts": 0,
+                "first_seen": today,
+                "last_post": today
+            }
+        else:
+            self.stats["forum_activity"][tieba_name]["last_post"] = today
+
+        self._save_stats()
+
     def get_daily_stats(self, days: int = 7) -> Dict[str, Dict]:
         """
         获取最近N天的统计

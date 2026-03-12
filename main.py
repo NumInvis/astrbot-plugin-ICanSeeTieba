@@ -13,7 +13,7 @@ from typing import Dict, List, Optional, Set
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.star import Context, Star, register
+from astrbot.api.star import Context, Star, register, StarTools
 from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.core.message.message_event_result import MessageChain
 import astrbot.core.message.components as Comp
@@ -38,8 +38,11 @@ class TiebaPlugin(Star):
         self.context = context
 
         # 数据目录 - 使用 AstrBot 的数据目录规范
-        self.data_dir = os.path.join(os.path.dirname(__file__), "data")
+        self.data_dir = str(StarTools.get_data_dir("astrbot_plugin_ICanSeeTieba"))
         os.makedirs(self.data_dir, exist_ok=True)
+
+        # 数据迁移：从旧位置迁移数据（如果存在）
+        self._migrate_data_if_needed()
 
         # 配置文件路径
         self.config_file = os.path.join(self.data_dir, "config.json")
@@ -85,7 +88,7 @@ class TiebaPlugin(Star):
                     default_config.update(loaded_config)
             except json.JSONDecodeError as e:
                 logger.error(f"配置文件JSON格式错误: {e}")
-            except Exception as e:
+            except (IOError, OSError) as e:
                 logger.error(f"加载配置文件失败: {e}")
 
         # 从 AstrBot 配置加载（优先级更高）
@@ -149,7 +152,7 @@ class TiebaPlugin(Star):
             try:
                 with open(self.config_file, 'w', encoding='utf-8') as f:
                     json.dump(config_data, f, ensure_ascii=False, indent=4)
-            except Exception as e:
+            except (IOError, OSError, TypeError) as e:
                 logger.error(f"保存配置文件失败: {e}")
 
     def _save_config(self):
@@ -166,7 +169,7 @@ class TiebaPlugin(Star):
         try:
             with open(self.config_file, 'w', encoding='utf-8') as f:
                 json.dump(config_data, f, ensure_ascii=False, indent=4)
-        except Exception as e:
+        except (IOError, OSError, TypeError) as e:
             logger.error(f"保存配置文件失败: {e}")
 
     async def _save_subscription_async(self):
@@ -175,7 +178,7 @@ class TiebaPlugin(Star):
             try:
                 with open(self.subscription_file, 'w', encoding='utf-8') as f:
                     json.dump({"forum_groups": self.sub_manager.forum_groups}, f, ensure_ascii=False, indent=4)
-            except Exception as e:
+            except (IOError, OSError, TypeError) as e:
                 logger.error(f"保存订阅配置失败: {e}")
 
     def _save_subscription(self):
@@ -183,7 +186,7 @@ class TiebaPlugin(Star):
         try:
             with open(self.subscription_file, 'w', encoding='utf-8') as f:
                 json.dump({"forum_groups": self.sub_manager.forum_groups}, f, ensure_ascii=False, indent=4)
-        except Exception as e:
+        except (IOError, OSError, TypeError) as e:
             logger.error(f"保存订阅配置失败: {e}")
 
     def _init_scheduler(self):
@@ -202,11 +205,11 @@ class TiebaPlugin(Star):
         # 移除旧任务
         try:
             self.context.scheduler.remove_job("tieba_monitor")
-        except Exception:
+        except (AttributeError, KeyError):
             pass
         try:
             self.context.scheduler.remove_job("tieba_daily_report")
-        except Exception:
+        except (AttributeError, KeyError):
             pass
 
         # 添加定时检查任务
@@ -236,7 +239,7 @@ class TiebaPlugin(Star):
         while True:
             try:
                 await self._check_all_forums()
-            except Exception as e:
+            except (IOError, OSError, ConnectionError) as e:
                 logger.error(f"监控任务出错: {e}")
             await asyncio.sleep(self.check_interval_seconds)
 
@@ -254,6 +257,31 @@ class TiebaPlugin(Star):
         await self.tieba_client.close()
 
     # ========== 权限检查 ==========
+
+    def _migrate_data_if_needed(self):
+        """从旧的数据位置迁移数据到新的标准位置"""
+        old_data_dir = os.path.join(os.path.dirname(__file__), "data")
+
+        # 如果旧数据目录存在且不是当前目录
+        if old_data_dir != self.data_dir and os.path.exists(old_data_dir):
+            import shutil
+            migrated = False
+
+            for filename in os.listdir(old_data_dir):
+                old_path = os.path.join(old_data_dir, filename)
+                new_path = os.path.join(self.data_dir, filename)
+
+                # 如果新位置没有该文件，则迁移
+                if os.path.isfile(old_path) and not os.path.exists(new_path):
+                    try:
+                        shutil.copy2(old_path, new_path)
+                        logger.info(f"数据迁移: {filename}")
+                        migrated = True
+                    except (IOError, OSError) as e:
+                        logger.error(f"迁移 {filename} 失败: {e}")
+
+            if migrated:
+                logger.info("数据迁移完成，旧数据保留在: " + old_data_dir)
 
     def _is_admin(self, event: AstrMessageEvent) -> bool:
         """检查用户是否为管理员"""
@@ -280,7 +308,7 @@ class TiebaPlugin(Star):
         for forum_name in self.sub_manager.get_all_forums():
             try:
                 await self._check_forum(forum_name)
-            except Exception as e:
+            except (IOError, OSError, ConnectionError) as e:
                 logger.error(f"检查贴吧[{forum_name}]时出错: {e}")
             # 添加延迟避免请求过快
             await asyncio.sleep(random.uniform(2, 4))
@@ -318,7 +346,7 @@ class TiebaPlugin(Star):
                     existing_tids = {str(t["tid"]) for t in existing_threads}
             except json.JSONDecodeError as e:
                 logger.error(f"贴吧[{forum_name}]数据文件JSON格式错误: {e}")
-            except Exception as e:
+            except (IOError, OSError) as e:
                 logger.error(f"读取贴吧[{forum_name}]数据文件失败: {e}")
 
         new_threads: List[Dict] = []
@@ -341,17 +369,20 @@ class TiebaPlugin(Star):
             new_threads.append(thread)
             existing_threads.append(thread)
 
-        # 保存数据（带锁）
-        if new_threads:
-            async with self._file_lock:
-                try:
-                    with open(output_path, 'w', encoding='utf-8') as f:
-                        json.dump(existing_threads, f, ensure_ascii=False, indent=4)
+        # 保存数据（带锁）- 无论是否有新帖子，都确保数据被保存
+        async with self._file_lock:
+            try:
+                with open(output_path, 'w', encoding='utf-8') as f:
+                    json.dump(existing_threads, f, ensure_ascii=False, indent=4)
 
-                    # 更新统计
+                # 更新统计 - 只要有帖子数据就更新访问记录
+                if new_threads:
                     self.tracker.update_stats(forum_name, len(new_threads))
-                except Exception as e:
-                    logger.error(f"保存贴吧[{forum_name}]数据失败: {e}")
+                else:
+                    # 即使没有新帖子，也更新最后访问时间
+                    self.tracker.update_forum_activity(forum_name)
+            except (IOError, OSError, TypeError) as e:
+                logger.error(f"保存贴吧[{forum_name}]数据失败: {e}")
 
         # 发送热帖通知
         if hot_threads:
@@ -368,7 +399,7 @@ class TiebaPlugin(Star):
                 try:
                     await self._send_thread(group_id, thread)
                     await asyncio.sleep(random.uniform(2, 4))
-                except Exception as e:
+                except (IOError, OSError, ConnectionError) as e:
                     logger.error(f"发送通知到群{group_id}失败: {e}")
 
     async def _send_thread(self, group_id: str, thread_info: Dict, is_manual: bool = False):
@@ -420,14 +451,14 @@ class TiebaPlugin(Star):
                 try:
                     if image_url and image_url.startswith(('http://', 'https://')):
                         chain.append(Comp.Image.fromURL(image_url))
-                except Exception as img_e:
+                except (IOError, OSError, ConnectionError) as img_e:
                     logger.warning(f"添加图片到消息时出错: {img_e}")
 
             # 发送消息
             await self.context.send_message(group_id, MessageChain(chain))
             logger.info(f"帖子通知已发送到群 {group_id}: {title}")
 
-        except Exception as e:
+        except (IOError, OSError, ConnectionError) as e:
             logger.error(f"发送通知到群 {group_id} 时出错: {e}")
 
     async def _send_hot_notification(self, hot_info: Dict, group_ids: List[str]):
@@ -469,7 +500,7 @@ class TiebaPlugin(Star):
                 logger.info(f"热帖通知已发送到群 {group_id}: {title}")
                 await asyncio.sleep(random.uniform(2, 3))
 
-            except Exception as e:
+            except (IOError, OSError, ConnectionError) as e:
                 logger.error(f"发送热帖通知到群 {group_id} 时出错: {e}")
 
     async def _daily_report(self):
@@ -493,7 +524,7 @@ class TiebaPlugin(Star):
                     await self._send_plain_text(group_id, msg)
                     sent_groups.add(group_id)
                     await asyncio.sleep(2)
-                except Exception as e:
+                except (IOError, OSError, ConnectionError) as e:
                     logger.error(f"发送每日报告到群{group_id}失败: {e}")
 
     def _build_report(self, yesterday: str, daily_stats: Dict, ranking: List[Dict], hot_threads: List[Dict]) -> str:
@@ -541,7 +572,7 @@ class TiebaPlugin(Star):
         try:
             chain = [Comp.Plain(text)]
             await self.context.send_message(group_id, MessageChain(chain))
-        except Exception as e:
+        except (IOError, OSError, ConnectionError) as e:
             logger.error(f"发送消息到群 {group_id} 时出错: {e}")
 
     # ========== 命令处理 ==========
@@ -757,7 +788,7 @@ class TiebaPlugin(Star):
 
         except json.JSONDecodeError:
             yield event.plain_result("❌ 数据文件格式错误")
-        except Exception as e:
+        except (IOError, OSError) as e:
             logger.error(f"读取历史失败: {e}")
             yield event.plain_result("❌ 读取数据失败")
 
@@ -805,7 +836,7 @@ class TiebaPlugin(Star):
 
             except json.JSONDecodeError:
                 logger.warning(f"搜索时JSON解析失败: {file_path}")
-            except Exception:
+            except (IOError, OSError):
                 continue
 
         if not results:
@@ -1026,7 +1057,7 @@ class TiebaPlugin(Star):
             latest = threads[0]
             await self._send_thread(group_id, latest, is_manual=True)
 
-        except Exception as e:
+        except (IOError, OSError, ConnectionError) as e:
             logger.error(f"刷新贴吧失败: {e}")
             yield event.plain_result(f"❌ 刷新失败: {str(e)}")
 
@@ -1052,7 +1083,7 @@ class TiebaPlugin(Star):
                 try:
                     await self._check_forum(forum_name)
                     success_count += 1
-                except Exception as e:
+                except (IOError, OSError, ConnectionError) as e:
                     logger.error(f"检查贴吧[{forum_name}]失败: {e}")
                     fail_count += 1
                 await asyncio.sleep(2)
@@ -1060,6 +1091,6 @@ class TiebaPlugin(Star):
             result_msg = f"检查完成！\n✅ 成功: {success_count}个\n❌ 失败: {fail_count}个"
             yield event.plain_result(result_msg)
 
-        except Exception as e:
+        except (IOError, OSError, ConnectionError) as e:
             logger.error(f"手动检查贴吧失败: {e}")
             yield event.plain_result(f"❌ 检查失败: {str(e)}")

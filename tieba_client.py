@@ -70,7 +70,7 @@ class TiebaClient:
                         try:
                             thread_info = self._convert_thread(thread, forum_name)
                             threads.append(thread_info)
-                        except Exception as conv_e:
+                        except (AttributeError, TypeError) as conv_e:
                             logger.warning(f"转换帖子数据失败: {conv_e}")
                             continue
 
@@ -95,11 +95,6 @@ class TiebaClient:
             except aiotieba.TiebaError as e:
                 attempt += 1
                 logger.error(f"aiotieba错误 - 获取贴吧[{forum_name}]帖子失败(尝试{attempt}/{retry}): {e}")
-                if attempt < retry:
-                    await asyncio.sleep(random.uniform(1, 3))
-            except Exception as e:
-                attempt += 1
-                logger.error(f"获取贴吧[{forum_name}]帖子失败(尝试{attempt}/{retry}): {e}")
                 if attempt < retry:
                     await asyncio.sleep(random.uniform(1, 3))
 
@@ -136,7 +131,7 @@ class TiebaClient:
                 thread_info["author_id"] = author
             else:
                 thread_info["author_id"] = "未知用户"
-        except Exception:
+        except (AttributeError, TypeError):
             thread_info["author_id"] = "未知用户"
 
         # 时间转换
@@ -166,7 +161,7 @@ class TiebaClient:
                             if self._is_valid_url(img_url):
                                 images.append(img_url)
                     thread_info["images"] = images[:3]  # 最多3张图片
-        except Exception as img_e:
+        except (AttributeError, TypeError) as img_e:
             logger.warning(f"获取帖子图片失败: {img_e}")
             thread_info["images"] = []
 
