@@ -10,6 +10,8 @@ import os
 from typing import Dict, List, Set, Optional
 from filelock import FileLock
 
+from astrbot.api import logger
+
 
 class SubscriptionManager:
     """订阅管理器"""
@@ -54,7 +56,7 @@ class SubscriptionManager:
                         self._sync_to_forum_groups()
                     
                 except (json.JSONDecodeError, IOError, OSError) as e:
-                    print(f"加载订阅配置失败: {e}")
+                    logger.error(f"加载订阅配置失败: {e}")
     
     def _save(self):
         """保存配置"""
@@ -75,7 +77,7 @@ class SubscriptionManager:
                     json.dump(config, f, ensure_ascii=False, indent=4)
                 return True
             except (IOError, OSError, TypeError) as e:
-                print(f"保存订阅配置失败: {e}")
+                logger.error(f"保存订阅配置失败: {e}")
                 return False
     
     def _sync_to_group_forums(self):

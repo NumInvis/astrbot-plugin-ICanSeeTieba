@@ -11,6 +11,7 @@ import random
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Set
 
+import aiofiles
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register, StarTools
@@ -22,10 +23,6 @@ from ._version import __version__, __plugin_name__, __author__, __plugin_desc__
 from .tieba_client import TiebaClient
 from .tracker import HotThreadTracker
 from .subscription_manager import SubscriptionManager
-
-
-# ============ 配置常量 ============
-ADMIN_USERS: List[str] = []  # 将在初始化时从配置加载
 
 
 @register(__plugin_name__, __author__, __plugin_desc__, __version__)
@@ -52,15 +49,11 @@ class TiebaPlugin(Star):
         self.sub_manager = SubscriptionManager(self.data_dir)
 
         # 加载配置
-        self._load_config()
+        self._load_config_sync()
 
         # 初始化组件
         self.tieba_client = TiebaClient()
         self.tracker = HotThreadTracker(self.data_dir)
-
-        # 全局管理员列表
-        global ADMIN_USERS
-        ADMIN_USERS = self.admin_users.copy()
 
         # 文件写入锁，防止并发写入
         self._file_lock = asyncio.Lock()
@@ -68,8 +61,8 @@ class TiebaPlugin(Star):
         mode_display = self.sub_manager.get_mode_display()
         logger.info(f"贴吧观察者已加载: 监控{len(self.sub_manager.get_all_forums())}个贴吧，当前模式：{mode_display}")
 
-    def _load_config(self):
-        """加载配置文件"""
+    def _load_config_sync(self):
+        """同步加载配置文件（仅在初始化时使用）"""
         # 默认配置
         default_config = {
             "check_interval_seconds": 300,
@@ -134,9 +127,6 @@ class TiebaPlugin(Star):
                 for group in groups:
                     self.sub_manager.subscribe(forum, group)
 
-        # 保存配置
-        self._save_config()
-
     async def _save_config_async(self):
         """异步保存配置到文件（带锁）"""
         config_data = {
@@ -150,44 +140,19 @@ class TiebaPlugin(Star):
 
         async with self._file_lock:
             try:
-                with open(self.config_file, 'w', encoding='utf-8') as f:
-                    json.dump(config_data, f, ensure_ascii=False, indent=4)
+                async with aiofiles.open(self.config_file, 'w', encoding='utf-8') as f:
+                    await f.write(json.dumps(config_data, ensure_ascii=False, indent=4))
             except (IOError, OSError, TypeError) as e:
                 logger.error(f"保存配置文件失败: {e}")
-
-    def _save_config(self):
-        """同步保存配置到文件"""
-        config_data = {
-            "check_interval_seconds": self.check_interval_seconds,
-            "threads_to_retrieve": self.threads_to_retrieve,
-            "hot_reply_threshold": self.hot_reply_threshold,
-            "hot_agree_threshold": self.hot_agree_threshold,
-            "admin_users": self.admin_users,
-            "forum_groups": self.sub_manager.forum_groups
-        }
-
-        try:
-            with open(self.config_file, 'w', encoding='utf-8') as f:
-                json.dump(config_data, f, ensure_ascii=False, indent=4)
-        except (IOError, OSError, TypeError) as e:
-            logger.error(f"保存配置文件失败: {e}")
 
     async def _save_subscription_async(self):
         """异步保存订阅配置（带锁）"""
         async with self._file_lock:
             try:
-                with open(self.subscription_file, 'w', encoding='utf-8') as f:
-                    json.dump({"forum_groups": self.sub_manager.forum_groups}, f, ensure_ascii=False, indent=4)
+                async with aiofiles.open(self.subscription_file, 'w', encoding='utf-8') as f:
+                    await f.write(json.dumps({"forum_groups": self.sub_manager.forum_groups}, ensure_ascii=False, indent=4))
             except (IOError, OSError, TypeError) as e:
                 logger.error(f"保存订阅配置失败: {e}")
-
-    def _save_subscription(self):
-        """同步保存订阅配置"""
-        try:
-            with open(self.subscription_file, 'w', encoding='utf-8') as f:
-                json.dump({"forum_groups": self.sub_manager.forum_groups}, f, ensure_ascii=False, indent=4)
-        except (IOError, OSError, TypeError) as e:
-            logger.error(f"保存订阅配置失败: {e}")
 
     def _init_scheduler(self):
         """初始化定时任务"""
@@ -341,8 +306,9 @@ class TiebaPlugin(Star):
 
         if os.path.exists(output_path):
             try:
-                with open(output_path, 'r', encoding='utf-8') as f:
-                    existing_threads = json.load(f)
+                async with aiofiles.open(output_path, 'r', encoding='utf-8') as f:
+                    content = await f.read()
+                    existing_threads = json.loads(content)
                     existing_tids = {str(t["tid"]) for t in existing_threads}
             except json.JSONDecodeError as e:
                 logger.error(f"贴吧[{forum_name}]数据文件JSON格式错误: {e}")
@@ -372,8 +338,8 @@ class TiebaPlugin(Star):
         # 保存数据（带锁）- 无论是否有新帖子，都确保数据被保存
         async with self._file_lock:
             try:
-                with open(output_path, 'w', encoding='utf-8') as f:
-                    json.dump(existing_threads, f, ensure_ascii=False, indent=4)
+                async with aiofiles.open(output_path, 'w', encoding='utf-8') as f:
+                    await f.write(json.dumps(existing_threads, ensure_ascii=False, indent=4))
 
                 # 更新统计 - 只要有帖子数据就更新访问记录
                 if new_threads:
@@ -761,8 +727,9 @@ class TiebaPlugin(Star):
             return
 
         try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                threads = json.load(f)
+            async with aiofiles.open(file_path, 'r', encoding='utf-8') as f:
+                content = await f.read()
+                threads = json.loads(content)
 
             if not threads:
                 yield event.plain_result(f"📭 【{forum_name}吧】暂无帖子")
@@ -813,14 +780,15 @@ class TiebaPlugin(Star):
             file_path = os.path.join(self.data_dir, filename)
 
             try:
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    threads = json.load(f)
+                async with aiofiles.open(file_path, 'r', encoding='utf-8') as f:
+                    content = await f.read()
+                    threads = json.loads(content)
 
                 for thread in threads:
                     title = thread.get('title', '')
-                    content = thread.get('text', '')
+                    content_text = thread.get('text', '')
 
-                    if keyword.lower() in title.lower() or keyword.lower() in content.lower():
+                    if keyword.lower() in title.lower() or keyword.lower() in content_text.lower():
                         results.append({
                             'tieba': forum_name,
                             'title': title,
