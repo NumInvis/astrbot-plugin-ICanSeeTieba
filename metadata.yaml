@@ -1,5 +1,5 @@
 name: astrbot_plugin_ICanSeeTieba
-desc: 贴吧观察者 - 监控指定贴吧的新帖子并推送到群聊
+desc: 实时监控贴吧新帖、热帖预警、多群推送，支持 Web 管理界面
 help: |
   📢 贴吧观察者插件使用说明 (v1.0.0)
 
@@ -25,3 +25,4 @@ help: |
   注意：所有命令需要管理员权限
 version: "1.0.0"
 author: NumInvis
+repo: https://github.com/NumInvis/astrbot-plugin-ICanSeeTieba
