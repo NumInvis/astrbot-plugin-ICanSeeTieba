@@ -199,6 +199,13 @@ class TiebaPlugin(Star):
             logger.warning("没有配置任何贴吧监控")
             return
 
+        # 检查是否有调度器
+        if not hasattr(self.context, 'scheduler') or self.context.scheduler is None:
+            logger.warning("AstrBot 调度器不可用，使用异步任务替代")
+            # 创建异步任务替代调度器
+            asyncio.create_task(self._async_monitor())
+            return
+
         # 移除旧任务
         try:
             self.context.scheduler.remove_job("tieba_monitor")
@@ -229,6 +236,16 @@ class TiebaPlugin(Star):
         )
 
         logger.info(f"定时任务已启动: 检查间隔{self.check_interval_seconds}秒")
+
+    async def _async_monitor(self):
+        """异步监控任务（当调度器不可用时使用）"""
+        logger.info("启动异步监控任务")
+        while True:
+            try:
+                await self._check_all_forums()
+            except Exception as e:
+                logger.error(f"监控任务出错: {e}")
+            await asyncio.sleep(self.check_interval_seconds)
 
     async def initialize(self):
         """插件初始化时执行"""
