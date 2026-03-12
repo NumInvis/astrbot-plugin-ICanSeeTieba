@@ -1,227 +1,207 @@
-# 贴吧观察者 (astrbot_plugin_ICanSeeTieba)
+# 🔍 贴吧观察者
 
-[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/NumInvis/astrbot-plugin-ICanSeeTieba)
-[![AstrBot](https://img.shields.io/badge/AstrBot-3.0+-green.svg)](https://github.com/AstrBotDevs/AstrBot)
-[![License](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
+[![AstrBot](https://img.shields.io/badge/AstrBot-Plugin-blue)](https://github.com/Soulter/AstrBot)
+[![GitHub stars](https://img.shields.io/github/stars/NumInvis/astrbot-plugin-ICanSeeTieba?style=social)](https://github.com/NumInvis/astrbot-plugin-ICanSeeTieba/stargazers)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-一个用于 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 的贴吧监控插件。
+> 🎯 实时监控贴吧新帖，热帖秒级预警，支持多群推送和 Web 可视化管理
 
-**当前版本: v1.0.0**
+## ✨ 功能亮点
 
-## 📢 项目说明
+| 功能 | 描述 |
+|-----|------|
+| 📡 **实时监控** | 自动监控多个贴吧，新帖秒级推送到指定群 |
+| 🔥 **热帖预警** | 智能识别热帖（回复/点赞阈值），自动预警提醒 |
+| 📊 **数据统计** | 每日发帖统计、贴吧活跃度排行、热门帖子追踪 |
+| 🌐 **Web 管理** | 可视化配置界面，支持双模式订阅管理（贴吧↔群） |
+| 🔔 **多群推送** | 一个贴吧可推送到多个群，灵活配置 |
+| 🔍 **帖子搜索** | 支持按关键词搜索历史帖子 |
+| 📜 **历史查看** | 查看贴吧历史帖子记录 |
 
-本项目是基于 **nonebot-plugin-tieba-monitor** 移植的 AstrBot 插件。
+## 🚀 快速开始
 
-- **原项目**: [nonebot-plugin-tieba-monitor](https://pypi.org/project/nonebot-plugin-tieba-monitor/) (NoneBot2 贴吧监控插件)
-- **移植作者**: [NumInvis](https://github.com/NumInvis)
-- **适配平台**: [AstrBot](https://github.com/AstrBotDevs/AstrBot)
+### 1️⃣ 安装插件
 
-本项目在原项目的基础上，将其从 NoneBot2 框架移植到 AstrBot 框架，并进行了以下改进：
-- ✅ 完全适配 AstrBot 插件架构
-- ✅ 使用 AstrBot 的调度器进行定时任务
-- ✅ 使用 AstrBot 的消息链发送消息
-- ✅ 添加文件锁防止并发写入冲突
-- ✅ 完善错误处理和日志记录
-- ✅ 支持跨群订阅管理
+在 AstrBot 插件市场搜索 `贴吧观察者` 或手动安装：
 
-## 功能特性
-
-- 📢 **自动监控**: 定时检查指定贴吧的新帖子
-- 🔥 **热帖追踪**: 自动检测热门帖子（回复>100或点赞>1000）并发送预警
-- 📊 **数据统计**: 提供发帖统计、活跃度排行等功能
-- 🔍 **帖子搜索**: 支持搜索历史帖子
-- 📱 **消息推送**: 新帖自动推送到订阅的QQ群
-- 🖼️ **图片支持**: 自动获取并发送帖子图片
-
-## 安装方法
-
-### 方法一：通过 AstrBot 插件市场安装（推荐）
-
-1. 打开 AstrBot 管理面板
-2. 进入插件市场
-3. 搜索 "贴吧观察者" 或 "ICanSeeTieba"
-4. 点击安装
-
-### 方法二：手动安装
-
-1. 将插件文件夹复制到 AstrBot 的插件目录：
 ```bash
-cd /path/to/astrbot/data/plugins
+# 克隆到插件目录
 git clone https://github.com/NumInvis/astrbot-plugin-ICanSeeTieba.git
 ```
 
-2. 安装依赖：
-```bash
-cd astrbot-plugin-ICanSeeTieba
-pip install -r requirements.txt
-```
+### 2️⃣ 基本命令
 
-3. 重启 AstrBot
-
-## 配置说明
-
-在 AstrBot 的 `config.yaml` 中添加以下配置：
-
-```yaml
-# 贴吧观察者插件配置 (v1.0.0)
-tieba_check_interval_seconds: 300  # 检查间隔（秒），默认5分钟
-tieba_threads_to_retrieve: 5  # 每次获取的帖子数量
-
-# 贴吧-群组映射（必填）
-# 格式: {"贴吧名": ["群号1", "群号2"]}
-tieba_forum_groups:
-  "鸣潮":
-    - "123456789"
-  "李毅":
-    - "123456789"
-    - "987654321"
-
-# 管理员QQ列表（可选，这些QQ号可以使用所有命令）
-tieba_admin_users:
-  - "123456789"
-
-# 热帖阈值配置（可选）
-tieba_hot_reply_threshold: 100  # 回复数阈值
-tieba_hot_agree_threshold: 1000  # 点赞数阈值
-```
-
-## 使用命令
-
-**注意：所有命令都需要管理员权限（群管理员或在配置中指定的管理员）**
-
-### 查询命令
-
-| 命令 | 说明 | 示例 |
-|------|------|------|
-| `/tb菜单` | 显示主菜单 | `/tb菜单` |
-| `/tb帮助` | 显示详细帮助 | `/tb帮助` |
-| `/tb统计` | 查看最近7天发帖统计 | `/tb统计` |
-| `/tb排行` | 查看贴吧活跃度排行 | `/tb排行` |
-| `/tb热帖` | 查看热门帖子 | `/tb热帖` |
-| `/tb历史 <贴吧名> [数量]` | 查看历史帖子 | `/tb历史 鸣潮 10` |
-| `/tb搜索 <关键词>` | 搜索帖子 | `/tb搜索 攻略` |
-
-### 管理命令
-
-| 命令 | 说明 | 示例 |
-|------|------|------|
-| `/tb订阅 <贴吧名>` | 在当前群订阅贴吧 | `/tb订阅 鸣潮` |
-| `/tb订阅 <群号> <贴吧名>` | 为指定群订阅贴吧 | `/tb订阅 123456789 鸣潮` |
-| `/tb退订 <贴吧名>` | 在当前群取消贴吧订阅 | `/tb退订 鸣潮` |
-| `/tb退订 <群号> <贴吧名>` | 为指定群退订贴吧 | `/tb退订 123456789 鸣潮` |
-| `/tb列表` | 查看当前群订阅列表 | `/tb列表` |
-| `/tb全部订阅` | 查看所有群的订阅情况 | `/tb全部订阅` |
-| `/tb刷新 <贴吧名>` | 手动刷新指定贴吧 | `/tb刷新 鸣潮` |
-| `/tb检查` | 立即检查所有贴吧 | `/tb检查` |
-
-## 消息推送示例
-
-当有新帖子时，插件会发送如下格式的消息：
+发送以下命令开始使用：
 
 ```
-【鸣潮吧】这是帖子标题
-👤 作者: 用户名
+/tb菜单          # 查看主菜单
+/tb帮助          # 查看详细帮助
+
+# 订阅管理
+/tb订阅 鸣潮     # 在当前群订阅"鸣潮"吧
+/tb退订 鸣潮     # 在当前群退订"鸣潮"吧
+/tb列表          # 查看本群订阅的贴吧
+/tb全部订阅      # 查看所有订阅情况
+
+# 查询命令
+/tb统计          # 查看发帖统计
+/tb排行          # 查看贴吧活跃度排行
+/tb热帖          # 查看热门帖子
+/tb历史 鸣潮     # 查看历史帖子
+/tb搜索 关键词   # 搜索帖子
+
+# 管理命令
+/tb刷新 鸣潮     # 手动刷新指定贴吧
+/tb检查          # 立即检查所有贴吧
+/tb模式          # 切换订阅显示模式
+```
+
+### 3️⃣ Web 管理界面
+
+访问 `http://你的服务器IP:5000` 进入可视化配置界面：
+
+- 默认用户名：`root`
+- 默认密码：`moning`（首次登录后请立即修改）
+
+支持功能：
+- ⚙️ 基础配置（检查间隔、热帖阈值）
+- 👤 管理员管理
+- 📋 订阅管理（支持双模式切换）
+
+## 📸 功能预览
+
+### 新帖推送
+```
+【鸣潮吧】新帖标题
+👤 作者: xxx
 📝 内容: 帖子内容摘要...
-💬 回复:5 | 👍 点赞:10
-🔗 链接: https://tieba.baidu.com/p/123456789
-🕐 发布时间: 2024-01-15 10:30:00
-[图片]
+💬 回复:10 | 👍 点赞:50
+🔗 链接: https://tieba.baidu.com/p/xxx
+🕐 发布时间: 2024-01-01 12:00:00
 ```
 
-热帖预警消息：
-
+### 热帖预警
 ```
 🔥【热帖预警】🔥
-【鸣潮吧】热门帖子标题
-💬 回复: 150 | 👍 点赞: 1200
-🔗 链接: https://tieba.baidu.com/p/123456789
+【鸣潮吧】热帖标题
+💬 回复: 150 | 👍 点赞: 2000
+🔗 链接: https://tieba.baidu.com/p/xxx
 ```
 
-热帖升温提醒：
-
+### 每日报告
 ```
-📈【热帖升温】📈
-【鸣潮吧】热门帖子标题
-💬 回复: 250(+100) | 👍 点赞: 2200(+1000)
-🔗 链接: https://tieba.baidu.com/p/123456789
-```
+📊 每日数据报告 (2024-01-01)
+=========================
 
-## 文件结构
+📈 昨日发帖统计:
+  • 鸣潮: 50帖
+  • 原神内鬼: 30帖
 
-```
-astrbot_plugin_ICanSeeTieba/
-├── __init__.py          # 插件入口
-├── _version.py          # 版本管理
-├── main.py              # 主插件类（包含所有功能）
-├── tieba_client.py      # 贴吧客户端（aiotieba封装）
-├── tracker.py           # 热帖追踪和统计
-├── metadata.yaml        # 插件元数据
-├── requirements.txt     # 依赖
-├── README.md            # 说明文档
-├── LICENSE              # 许可证
-└── data/                # 数据目录（运行时创建）
-    ├── config.json          # 配置文件
-    ├── subscription.json    # 订阅配置
-    ├── {贴吧名}.json        # 各贴吧帖子数据
-    ├── hot_threads.json     # 热帖记录
-    └── stats.json           # 统计数据
+🏆 活跃度排行 TOP5:
+  1. 鸣潮: 500帖
+  2. 原神内鬼: 300帖
+
+🔥 热门帖子 TOP5:
+  1. [鸣潮]热帖标题
+     回复:100 点赞:1000
 ```
 
-## 数据存储
+## ⚙️ 配置说明
 
-插件会在 `data/` 目录下存储以下 JSON 文件：
+### 通过 Web 界面配置
 
-- `config.json` - 插件配置（检查间隔、阈值、管理员等）
-- `subscription.json` - 贴吧-群组订阅映射
-- `{贴吧名}.json` - 各贴吧的帖子数据
-- `hot_threads.json` - 热帖记录
-- `stats.json` - 统计数据（每日发帖量、活跃度等）
+访问 Web 管理界面，可以配置：
 
-## 版本历史
+| 配置项 | 默认值 | 说明 |
+|-------|-------|------|
+| 检查间隔 | 300秒 | 多久检查一次贴吧更新 |
+| 获取帖子数 | 5条 | 每次获取的最新帖子数量 |
+| 热帖回复阈值 | 100 | 回复数超过此值视为热帖 |
+| 热帖点赞阈值 | 1000 | 点赞数超过此值视为热帖 |
+
+### 通过 AstrBot 配置
+
+在 `data/config/astrbot_config.yaml` 中添加：
+
+```yaml
+# 贴吧观察者配置
+tieba_check_interval_seconds: 300
+tieba_threads_to_retrieve: 5
+tieba_hot_reply_threshold: 100
+tieba_hot_agree_threshold: 1000
+tieba_admin_users:
+  - "你的QQ号"
+tieba_forum_groups:
+  鸣潮:
+    - "群号1"
+    - "群号2"
+```
+
+## 🏗️ 技术架构
+
+```
+┌─────────────────────────────────────────┐
+│           AstrBot 框架                   │
+├─────────────────────────────────────────┤
+│  ┌─────────────┐    ┌─────────────┐    │
+│  │  命令处理器  │    │  定时任务   │    │
+│  └──────┬──────┘    └──────┬──────┘    │
+│         │                  │           │
+│  ┌──────▼──────────────────▼──────┐    │
+│  │        贴吧观察者插件          │    │
+│  │  ┌─────────┐  ┌─────────────┐ │    │
+│  │  │订阅管理器│  │  热帖追踪器  │ │    │
+│  │  └────┬────┘  └──────┬──────┘ │    │
+│  │       │              │        │    │
+│  │  ┌────▼──────────────▼────┐   │    │
+│  │  │      贴吧客户端        │   │    │
+│  │  │   (aiotieba封装)      │   │    │
+│  │  └────────────────────────┘   │    │
+│  └────────────────────────────────┘    │
+└─────────────────────────────────────────┘
+```
+
+## 📝 更新日志
 
 ### v1.0.0 (2024-03-12)
-- 🎉 初始版本发布
-- ✅ 贴吧监控核心功能
-- ✅ 热帖追踪与预警
-- ✅ 数据统计与排行
-- ✅ 跨群订阅管理
-- ✅ 完整的权限控制
+- ✨ 初始版本发布
+- 📡 贴吧实时监控功能
+- 🔥 热帖预警功能
+- 📊 数据统计功能
+- 🌐 Web 管理界面
+- 🔄 数据自动迁移
 
-## 注意事项
+## 🤝 贡献指南
 
-1. **频率限制**: 贴吧有反爬机制，请合理设置检查间隔（建议不小于300秒）
-2. **风控规避**: 插件内置了随机延迟机制，避免消息发送过快被风控
-3. **权限要求**: 所有命令需要管理员权限（群管理员或配置的管理员QQ）
-4. **订阅管理**: 使用 `/tb订阅` 和 `/tb退订` 可以动态管理订阅，无需重启机器人
+欢迎提交 Issue 和 PR！
 
-## 依赖
+1. Fork 本仓库
+2. 创建你的特性分支 (`git checkout -b feature/AmazingFeature`)
+3. 提交你的变更 (`git commit -m 'Add some AmazingFeature'`)
+4. 推送到分支 (`git push origin feature/AmazingFeature`)
+5. 打开一个 Pull Request
 
-- [aiotieba](https://github.com/Starry-OvO/aiotieba) >= 4.0.0 - 贴吧API封装
-- [aiohttp](https://github.com/aio-libs/aiohttp) >= 3.8.0 - HTTP客户端
+## 💖 赞助支持
 
-## 开源协议
+如果这个插件对你有帮助，可以考虑赞助支持开发者：
 
-本项目采用 [MIT License](LICENSE) 开源协议。
+[![爱发电](https://img.shields.io/badge/爱发电-赞助开发者-pink)](https://afdian.com/a/r0xy0)
 
-## 致谢
+👉 [https://afdian.com/a/r0xy0](https://afdian.com/a/r0xy0)
 
-### 原项目
-- **[nonebot-plugin-tieba-monitor](https://pypi.org/project/nonebot-plugin-tieba-monitor/)** - 本项目的原始代码基础
-  - PyPI: https://pypi.org/project/nonebot-plugin-tieba-monitor/
-  - 感谢原作者开发的优秀 NoneBot2 贴吧监控插件
+你的支持是我持续开发的动力！❤️
 
-### 依赖项目
-- [AstrBot](https://github.com/AstrBotDevs/AstrBot) - 优秀的QQ机器人框架
-- [aiotieba](https://github.com/Starry-OvO/aiotieba) - 贴吧API封装库
+## 📄 许可证
 
-## 相关项目
+本项目基于 [MIT](LICENSE) 许可证开源。
 
-- [astrbot-plugin-monningsignin](https://github.com/NumInvis/astrbot-plugin-monningsignin) - 莫宁宁的币 - AstrBot 经济系统插件
+## 🙏 致谢
 
-## 联系方式
+- [AstrBot](https://github.com/Soulter/AstrBot) - 优秀的聊天机器人框架
+- [aiotieba](https://github.com/Starry-OvO/aiotieba) - 贴吧 API 封装库
 
-- **作者**: [NumInvis](https://github.com/NumInvis)
-- **GitHub**: https://github.com/NumInvis/astrbot-plugin-ICanSeeTieba
-- **B站**: [鬼神莫能窥](https://space.bilibili.com/274736623)
+---
 
-欢迎提交 Issue 和 Pull Request！
+<p align="center">
+  Made with ❤️ by <a href="https://github.com/NumInvis">NumInvis</a>
+</p>
