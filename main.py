@@ -117,31 +117,19 @@ class TiebaPlugin(Star):
                     for k, v in forum_groups_from_config.items()
                 }
 
-        # 加载订阅配置（动态修改的）
-        if os.path.exists(self.subscription_file):
-            try:
-                with open(self.subscription_file, 'r', encoding='utf-8') as f:
-                    sub_data = json.load(f)
-                    # 合并订阅配置
-                    for forum, groups in sub_data.get("forum_groups", {}).items():
-                        if forum not in default_config["forum_groups"]:
-                            default_config["forum_groups"][forum] = []
-                        for group in groups:
-                            group_str = str(group)
-                            if group_str not in default_config["forum_groups"][forum]:
-                                default_config["forum_groups"][forum].append(group_str)
-            except json.JSONDecodeError as e:
-                logger.error(f"订阅配置文件JSON格式错误: {e}")
-            except Exception as e:
-                logger.error(f"加载订阅配置失败: {e}")
-
-        # 应用配置
+        # 应用基本配置
         self.check_interval_seconds = default_config["check_interval_seconds"]
         self.threads_to_retrieve = default_config["threads_to_retrieve"]
         self.hot_reply_threshold = default_config["hot_reply_threshold"]
         self.hot_agree_threshold = default_config["hot_agree_threshold"]
         self.admin_users = default_config["admin_users"]
-        self.forum_groups: Dict[str, List[str]] = default_config["forum_groups"]
+        
+        # 将配置中的订阅数据同步到订阅管理器
+        forum_groups = default_config.get("forum_groups", {})
+        if forum_groups:
+            for forum, groups in forum_groups.items():
+                for group in groups:
+                    self.sub_manager.subscribe(forum, group)
 
         # 保存配置
         self._save_config()

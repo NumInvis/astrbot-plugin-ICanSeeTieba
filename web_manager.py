@@ -706,6 +706,7 @@ HTML_TEMPLATE = """
             font-weight: bold;
             margin-bottom: 5px;
         }
+        .stat-label {
             font-size: 0.9em;
         }
         .flash-messages {
