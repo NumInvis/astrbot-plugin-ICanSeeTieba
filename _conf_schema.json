@@ -1,0 +1,32 @@
+{
+  "check_interval_seconds": {
+    "description": "检查间隔（秒）",
+    "type": "int",
+    "hint": "多久检查一次贴吧更新，建议在 60-3600 秒之间",
+    "default": 300
+  },
+  "threads_to_retrieve": {
+    "description": "获取帖子数",
+    "type": "int",
+    "hint": "每次检查获取的最新帖子数量",
+    "default": 5
+  },
+  "hot_reply_threshold": {
+    "description": "热帖回复阈值",
+    "type": "int",
+    "hint": "回复数超过此值的帖子会被标记为热帖",
+    "default": 100
+  },
+  "hot_agree_threshold": {
+    "description": "热帖点赞阈值",
+    "type": "int",
+    "hint": "点赞数超过此值的帖子会被标记为热帖",
+    "default": 1000
+  },
+  "admin_users": {
+    "description": "管理员列表",
+    "type": "list",
+    "hint": "可以使用管理命令的用户QQ号列表",
+    "default": []
+  }
+}

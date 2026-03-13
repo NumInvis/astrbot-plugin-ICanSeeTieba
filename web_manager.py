@@ -1,7 +1,6 @@
 """
 贴吧观察者 - Web管理界面 (FastAPI版本)
 用于可视化配置贴吧监控
-支持双模式：贴吧对应群 / 群对应贴吧
 """
 
 import hashlib
@@ -57,10 +56,6 @@ CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 USER_FILE = os.path.join(DATA_DIR, "user.json")
 CONFIG_LOCK = FileLock(os.path.join(DATA_DIR, "config.lock"))
 USER_LOCK = FileLock(os.path.join(DATA_DIR, "user.lock"))
-
-# 订阅模式
-MODE_FORUM_GROUPS = "forum_groups"  # 贴吧对应群
-MODE_GROUP_FORUMS = "group_forums"  # 群对应贴吧
 
 # 默认账号
 DEFAULT_USERNAME = "root"
@@ -144,9 +139,7 @@ def load_config() -> Dict:
             "hot_reply_threshold": 100,
             "hot_agree_threshold": 1000,
             "admin_users": [],
-            "forum_groups": {},
-            "group_forums": {},
-            "subscription_mode": MODE_FORUM_GROUPS
+            "forum_groups": {}
         }
 
 
@@ -218,12 +211,8 @@ def check_config_reload(sub_manager) -> bool:
     return False
 
 
-def get_mode_display(mode: str) -> str:
-    """获取模式显示名称"""
-    return "贴吧对应群" if mode == MODE_FORUM_GROUPS else "群对应贴吧"
-
-
 # 贴吧名称验证正则 - 与 main.py 保持一致，允许中文、字母、数字、下划线和连字符，长度2-20
+import re
 FORUM_NAME_PATTERN = re.compile(r'^[\u4e00-\u9fa5a-zA-Z0-9_\-]{2,20}$')
 
 
@@ -236,7 +225,6 @@ def validate_forum_name(name: str) -> bool:
 
 def validate_qq(qq: str) -> bool:
     """验证QQ号格式"""
-    import re
     return bool(re.match(r'^\d{5,11}$', qq))
 
 
@@ -455,16 +443,10 @@ async def index(request: Request, user: Dict = Depends(require_login)):
     
     # 计算统计信息
     forum_count = len(config.get("forum_groups", {}))
-    group_count = len(config.get("group_forums", {}))
-    
-    # 如果没有group_forums，从forum_groups计算
-    if not group_count and config.get("forum_groups"):
-        all_groups = set()
-        for groups in config["forum_groups"].values():
-            all_groups.update(groups)
-        group_count = len(all_groups)
-    
-    mode_display = get_mode_display(config.get("subscription_mode", MODE_FORUM_GROUPS))
+    all_groups = set()
+    for groups in config.get("forum_groups", {}).values():
+        all_groups.update(groups)
+    group_count = len(all_groups)
     
     csrf_token = generate_csrf_token()
     request.session['csrf_token'] = csrf_token
@@ -474,7 +456,6 @@ async def index(request: Request, user: Dict = Depends(require_login)):
         "config": config,
         "forum_count": forum_count,
         "group_count": group_count,
-        "mode_display": mode_display,
         "username": request.session.get('username', 'root'),
         "csrf_token": csrf_token
     })
@@ -571,62 +552,6 @@ async def remove_admin(
     raise HTTPException(status_code=400, detail="管理员不存在或删除失败")
 
 
-def _sync_forum_groups_to_group_forums(forum_groups: Dict) -> Dict:
-    """将forum_groups格式同步到group_forums格式 - 复用业务逻辑"""
-    group_forums = {}
-    for forum, groups in forum_groups.items():
-        for group in groups:
-            if group not in group_forums:
-                group_forums[group] = []
-            if forum not in group_forums[group]:
-                group_forums[group].append(forum)
-    return group_forums
-
-
-def _sync_group_forums_to_forum_groups(group_forums: Dict) -> Dict:
-    """将group_forums格式同步到forum_groups格式 - 复用业务逻辑"""
-    forum_groups = {}
-    for group, forums in group_forums.items():
-        for forum in forums:
-            if forum not in forum_groups:
-                forum_groups[forum] = []
-            if group not in forum_groups[forum]:
-                forum_groups[forum].append(group)
-    return forum_groups
-
-
-@app.post("/switch_mode")
-async def switch_mode(
-    request: Request,
-    mode: str = Form(...),
-    csrf_token: str = Form(...),
-    user: Dict = Depends(require_login)
-):
-    """切换订阅模式 - 使用复用的同步函数，遵循DRY原则"""
-    # 验证CSRF Token
-    if not validate_csrf_token(request, csrf_token):
-        raise HTTPException(status_code=403, detail="CSRF验证失败")
-    
-    config = load_config()
-    
-    if mode not in [MODE_FORUM_GROUPS, MODE_GROUP_FORUMS]:
-        raise HTTPException(status_code=400, detail="无效的模式")
-    
-    # 如果数据不完整，先同步 - 使用复用的同步函数
-    if not config.get("group_forums") and config.get("forum_groups"):
-        config["group_forums"] = _sync_forum_groups_to_group_forums(config["forum_groups"])
-    elif not config.get("forum_groups") and config.get("group_forums"):
-        config["forum_groups"] = _sync_group_forums_to_forum_groups(config["group_forums"])
-    
-    config['subscription_mode'] = mode
-    
-    if save_config(config):
-        mode_display = get_mode_display(mode)
-        return RedirectResponse(url=f"/?success=已切换到【{mode_display}】模式", status_code=302)
-    else:
-        raise HTTPException(status_code=500, detail="模式切换失败")
-
-
 @app.post("/add_subscription")
 async def add_subscription(
     request: Request,
@@ -656,22 +581,13 @@ async def add_subscription(
     # 初始化数据结构
     if "forum_groups" not in config:
         config["forum_groups"] = {}
-    if "group_forums" not in config:
-        config["group_forums"] = {}
     
     # 添加订阅关系
     for group_id in group_ids_list:
-        # 更新forum_groups
         if forum_name not in config["forum_groups"]:
             config["forum_groups"][forum_name] = []
         if group_id not in config["forum_groups"][forum_name]:
             config["forum_groups"][forum_name].append(group_id)
-        
-        # 更新group_forums
-        if group_id not in config["group_forums"]:
-            config["group_forums"][group_id] = []
-        if forum_name not in config["group_forums"][group_id]:
-            config["group_forums"][group_id].append(forum_name)
     
     if save_config(config):
         return RedirectResponse(url=f"/?success=贴吧 {forum_name} 订阅成功", status_code=302)
@@ -695,13 +611,6 @@ async def remove_forum(
     forum = forum.strip()
     
     if forum in config.get("forum_groups", {}):
-        # 从所有群中移除该贴吧
-        for group in config["forum_groups"][forum]:
-            if group in config.get("group_forums", {}) and forum in config["group_forums"][group]:
-                config["group_forums"][group].remove(forum)
-                if not config["group_forums"][group]:
-                    del config["group_forums"][group]
-        
         del config["forum_groups"][forum]
         
         if save_config(config):
@@ -714,6 +623,7 @@ async def remove_forum(
 async def remove_group(
     request: Request,
     group: str = Form(...),
+    forum: str = Form(...),
     csrf_token: str = Form(...),
     user: Dict = Depends(require_login)
 ):
@@ -724,21 +634,17 @@ async def remove_group(
     
     config = load_config()
     group = group.strip()
+    forum = forum.strip()
     
-    if group in config.get("group_forums", {}):
-        # 从所有贴吧中移除该群
-        for forum in config["group_forums"][group]:
-            if forum in config.get("forum_groups", {}) and group in config["forum_groups"][forum]:
-                config["forum_groups"][forum].remove(group)
-                if not config["forum_groups"][forum]:
-                    del config["forum_groups"][forum]
-        
-        del config["group_forums"][group]
+    if forum in config.get("forum_groups", {}) and group in config["forum_groups"][forum]:
+        config["forum_groups"][forum].remove(group)
+        if not config["forum_groups"][forum]:
+            del config["forum_groups"][forum]
         
         if save_config(config):
             return RedirectResponse(url="/?success=群订阅已删除", status_code=302)
     
-    raise HTTPException(status_code=400, detail="群不存在或删除失败")
+    raise HTTPException(status_code=400, detail="订阅不存在或删除失败")
 
 
 # 导出 app 实例供 main.py 使用

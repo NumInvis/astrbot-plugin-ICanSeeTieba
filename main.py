@@ -8,11 +8,9 @@ import asyncio
 import json
 import os
 import random
-import re
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Set
 
-import aiofiles
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register, StarTools
@@ -23,19 +21,10 @@ import astrbot.core.message.components as Comp
 from ._version import __version__, __plugin_name__, __author__, __plugin_desc__
 from .tieba_client import TiebaClient
 from .tracker import HotThreadTracker
-from .subscription_manager import SubscriptionManager
 
 
-# 贴吧名称验证正则 - 只允许中文、字母、数字、下划线和连字符，长度2-20
-FORUM_NAME_PATTERN = re.compile(r'^[\u4e00-\u9fa5a-zA-Z0-9_\-]{2,20}$')
-
-
-def validate_forum_name(forum_name: str) -> bool:
-    """验证贴吧名称是否合法（防止路径遍历）- 直接使用正则验证"""
-    if not forum_name or not isinstance(forum_name, str):
-        return False
-    # 直接使用正则验证（已包含长度和字符限制）
-    return bool(FORUM_NAME_PATTERN.match(forum_name))
+# ============ 配置常量 ============
+ADMIN_USERS: List[str] = []  # 将在初始化时从配置加载
 
 
 @register(__plugin_name__, __author__, __plugin_desc__, __version__)
@@ -51,31 +40,31 @@ class TiebaPlugin(Star):
         self.data_dir = str(StarTools.get_data_dir("astrbot_plugin_ICanSeeTieba"))
         os.makedirs(self.data_dir, exist_ok=True)
 
-        # 数据迁移：从旧位置迁移数据（如果存在）
-        self._migrate_data_if_needed()
-
         # 配置文件路径
         self.config_file = os.path.join(self.data_dir, "config.json")
         self.subscription_file = os.path.join(self.data_dir, "subscription.json")
-
-        # 初始化订阅管理器
-        self.sub_manager = SubscriptionManager(self.data_dir)
+        
+        # 保存群的 unified_msg_origin
+        self.group_origins: Dict[str, str] = {}
 
         # 加载配置
-        self._load_config_sync()
+        self._load_config()
 
         # 初始化组件
         self.tieba_client = TiebaClient()
         self.tracker = HotThreadTracker(self.data_dir)
 
+        # 全局管理员列表
+        global ADMIN_USERS
+        ADMIN_USERS = self.admin_users.copy()
+
         # 文件写入锁，防止并发写入
         self._file_lock = asyncio.Lock()
 
-        mode_display = self.sub_manager.get_mode_display()
-        logger.info(f"贴吧观察者已加载: 监控{len(self.sub_manager.get_all_forums())}个贴吧，当前模式：{mode_display}")
+        logger.info(f"贴吧观察者已加载: 监控{len(self.forum_groups)}个贴吧")
 
-    def _load_config_sync(self):
-        """同步加载配置文件（仅在初始化时使用）"""
+    def _load_config(self):
+        """加载配置文件"""
         # 默认配置
         default_config = {
             "check_interval_seconds": 300,
@@ -83,7 +72,8 @@ class TiebaPlugin(Star):
             "hot_reply_threshold": 100,
             "hot_agree_threshold": 1000,
             "admin_users": [],
-            "forum_groups": {}
+            "forum_groups": {},
+            "group_origins": {}
         }
 
         # 从文件加载配置
@@ -94,7 +84,7 @@ class TiebaPlugin(Star):
                     default_config.update(loaded_config)
             except json.JSONDecodeError as e:
                 logger.error(f"配置文件JSON格式错误: {e}")
-            except (IOError, OSError) as e:
+            except Exception as e:
                 logger.error(f"加载配置文件失败: {e}")
 
         # 从 AstrBot 配置加载（优先级更高）
@@ -126,25 +116,93 @@ class TiebaPlugin(Star):
                     for k, v in forum_groups_from_config.items()
                 }
 
-        # 应用基本配置
+        # 加载订阅配置（动态修改的）
+        if os.path.exists(self.subscription_file):
+            try:
+                with open(self.subscription_file, 'r', encoding='utf-8') as f:
+                    sub_data = json.load(f)
+                    # 合并订阅配置
+                    for forum, groups in sub_data.get("forum_groups", {}).items():
+                        if forum not in default_config["forum_groups"]:
+                            default_config["forum_groups"][forum] = []
+                        for group in groups:
+                            group_str = str(group)
+                            if group_str not in default_config["forum_groups"][forum]:
+                                default_config["forum_groups"][forum].append(group_str)
+            except json.JSONDecodeError as e:
+                logger.error(f"订阅配置文件JSON格式错误: {e}")
+            except Exception as e:
+                logger.error(f"加载订阅配置失败: {e}")
+
+        # 应用配置
         self.check_interval_seconds = default_config["check_interval_seconds"]
         self.threads_to_retrieve = default_config["threads_to_retrieve"]
         self.hot_reply_threshold = default_config["hot_reply_threshold"]
         self.hot_agree_threshold = default_config["hot_agree_threshold"]
         self.admin_users = default_config["admin_users"]
-        
-        # 将配置中的订阅数据同步到订阅管理器
-        forum_groups = default_config.get("forum_groups", {})
-        if forum_groups:
-            for forum, groups in forum_groups.items():
-                for group in groups:
-                    self.sub_manager.subscribe(forum, group)
+        self.forum_groups: Dict[str, List[str]] = default_config["forum_groups"]
+        self.group_origins = default_config.get("group_origins", {})
 
+        # 保存配置
+        self._save_config()
 
+    async def _save_config_async(self):
+        """异步保存配置到文件（带锁）"""
+        config_data = {
+            "check_interval_seconds": self.check_interval_seconds,
+            "threads_to_retrieve": self.threads_to_retrieve,
+            "hot_reply_threshold": self.hot_reply_threshold,
+            "hot_agree_threshold": self.hot_agree_threshold,
+            "admin_users": self.admin_users,
+            "forum_groups": self.forum_groups,
+            "group_origins": self.group_origins
+        }
+
+        async with self._file_lock:
+            try:
+                with open(self.config_file, 'w', encoding='utf-8') as f:
+                    json.dump(config_data, f, ensure_ascii=False, indent=4)
+            except Exception as e:
+                logger.error(f"保存配置文件失败: {e}")
+
+    def _save_config(self):
+        """同步保存配置到文件"""
+        config_data = {
+            "check_interval_seconds": self.check_interval_seconds,
+            "threads_to_retrieve": self.threads_to_retrieve,
+            "hot_reply_threshold": self.hot_reply_threshold,
+            "hot_agree_threshold": self.hot_agree_threshold,
+            "admin_users": self.admin_users,
+            "forum_groups": self.forum_groups,
+            "group_origins": self.group_origins
+        }
+
+        try:
+            with open(self.config_file, 'w', encoding='utf-8') as f:
+                json.dump(config_data, f, ensure_ascii=False, indent=4)
+        except Exception as e:
+            logger.error(f"保存配置文件失败: {e}")
+
+    async def _save_subscription_async(self):
+        """异步保存订阅配置（带锁）"""
+        async with self._file_lock:
+            try:
+                with open(self.subscription_file, 'w', encoding='utf-8') as f:
+                    json.dump({"forum_groups": self.forum_groups}, f, ensure_ascii=False, indent=4)
+            except Exception as e:
+                logger.error(f"保存订阅配置失败: {e}")
+
+    def _save_subscription(self):
+        """同步保存订阅配置"""
+        try:
+            with open(self.subscription_file, 'w', encoding='utf-8') as f:
+                json.dump({"forum_groups": self.forum_groups}, f, ensure_ascii=False, indent=4)
+        except Exception as e:
+            logger.error(f"保存订阅配置失败: {e}")
 
     def _init_scheduler(self):
         """初始化定时任务"""
-        if not self.sub_manager.get_all_forums():
+        if not self.forum_groups:
             logger.warning("没有配置任何贴吧监控")
             return
 
@@ -158,11 +216,11 @@ class TiebaPlugin(Star):
         # 移除旧任务
         try:
             self.context.scheduler.remove_job("tieba_monitor")
-        except (AttributeError, KeyError):
+        except Exception:
             pass
         try:
             self.context.scheduler.remove_job("tieba_daily_report")
-        except (AttributeError, KeyError):
+        except Exception:
             pass
 
         # 添加定时检查任务
@@ -191,27 +249,13 @@ class TiebaPlugin(Star):
         logger.info("启动异步监控任务")
         while True:
             try:
-                # 检查Web后台是否修改了配置
-                self._check_config_reload()
                 await self._check_all_forums()
-            except (IOError, OSError, ConnectionError) as e:
+            except Exception as e:
                 logger.error(f"监控任务出错: {e}")
             await asyncio.sleep(self.check_interval_seconds)
 
-    def _check_config_reload(self):
-        """检查是否需要从Web后台重载配置"""
-        try:
-            from .web_manager import check_config_reload
-            if check_config_reload(self.sub_manager):
-                logger.info("配置已从Web管理后台更新")
-        except Exception as e:
-            logger.debug(f"检查配置重载失败: {e}")
-
     async def initialize(self):
         """插件初始化时执行"""
-        # 启动Web管理后台
-        self._start_web_manager()
-        
         # 延迟初始化定时任务，确保scheduler已准备好
         await asyncio.sleep(2)
         self._init_scheduler()
@@ -222,70 +266,8 @@ class TiebaPlugin(Star):
     async def terminate(self):
         """插件卸载时清理资源"""
         await self.tieba_client.close()
-        # 停止Web服务
-        self._stop_web_manager()
-
-    def _start_web_manager(self):
-        """启动Web管理后台服务 - 使用Uvicorn Server实例以便优雅关闭"""
-        try:
-            import threading
-            import uvicorn
-            from .web_manager import app
-            
-            # 创建Uvicorn配置和服务器实例
-            config = uvicorn.Config(app, host='0.0.0.0', port=5000, log_level='warning')
-            self._uvicorn_server = uvicorn.Server(config)
-            
-            # 在后台线程中启动Web服务
-            self._web_thread = threading.Thread(
-                target=self._uvicorn_server.run,
-                daemon=True
-            )
-            self._web_thread.start()
-            logger.info("🌐 Web管理后台已启动: http://0.0.0.0:5000")
-        except Exception as e:
-            logger.error(f"启动Web管理后台失败: {e}")
-
-    def _stop_web_manager(self):
-        """停止Web管理后台服务 - 优雅关闭Uvicorn服务器"""
-        try:
-            if hasattr(self, '_uvicorn_server') and self._uvicorn_server:
-                # 设置should_exit标志，让Uvicorn优雅关闭
-                self._uvicorn_server.should_exit = True
-                logger.info("🌐 Web管理后台正在停止...")
-                # 等待一小段时间让服务器完成关闭
-                import time
-                time.sleep(1)
-        except Exception as e:
-            logger.error(f"停止Web管理后台时出错: {e}")
-        logger.info("🌐 Web管理后台已停止")
 
     # ========== 权限检查 ==========
-
-    def _migrate_data_if_needed(self):
-        """从旧的数据位置迁移数据到新的标准位置"""
-        old_data_dir = os.path.join(os.path.dirname(__file__), "data")
-
-        # 如果旧数据目录存在且不是当前目录
-        if old_data_dir != self.data_dir and os.path.exists(old_data_dir):
-            import shutil
-            migrated = False
-
-            for filename in os.listdir(old_data_dir):
-                old_path = os.path.join(old_data_dir, filename)
-                new_path = os.path.join(self.data_dir, filename)
-
-                # 如果新位置没有该文件，则迁移
-                if os.path.isfile(old_path) and not os.path.exists(new_path):
-                    try:
-                        shutil.copy2(old_path, new_path)
-                        logger.info(f"数据迁移: {filename}")
-                        migrated = True
-                    except (IOError, OSError) as e:
-                        logger.error(f"迁移 {filename} 失败: {e}")
-
-            if migrated:
-                logger.info("数据迁移完成，旧数据保留在: " + old_data_dir)
 
     def _is_admin(self, event: AstrMessageEvent) -> bool:
         """检查用户是否为管理员"""
@@ -305,21 +287,34 @@ class TiebaPlugin(Star):
             return str(group_id)
         return None
 
+    def _save_group_origin(self, event: AstrMessageEvent):
+        """保存群的 unified_msg_origin"""
+        group_id = self._get_group_id(event)
+        if group_id and hasattr(event, 'unified_msg_origin'):
+            self.group_origins[group_id] = event.unified_msg_origin
+            self._save_config()
+
+    def _get_session_for_group(self, group_id: str) -> str:
+        """获取群的会话标识"""
+        if group_id in self.group_origins:
+            return self.group_origins[group_id]
+        return group_id
+
     # ========== 定时任务 ==========
 
     async def _check_all_forums(self):
         """检查所有订阅的贴吧"""
-        for forum_name in self.sub_manager.get_all_forums():
+        for forum_name in list(self.forum_groups.keys()):
             try:
                 await self._check_forum(forum_name)
-            except (IOError, OSError, ConnectionError) as e:
+            except Exception as e:
                 logger.error(f"检查贴吧[{forum_name}]时出错: {e}")
             # 添加延迟避免请求过快
             await asyncio.sleep(random.uniform(2, 4))
 
     async def _check_forum(self, forum_name: str):
         """检查单个贴吧的新帖子"""
-        notify_groups = self.sub_manager.get_forum_groups(forum_name)
+        notify_groups = self.forum_groups.get(forum_name, [])
         if not notify_groups:
             return
 
@@ -338,11 +333,6 @@ class TiebaPlugin(Star):
 
     async def _process_threads(self, forum_name: str, threads: List[Dict]) -> List[Dict]:
         """处理帖子数据，过滤已存在的帖子"""
-        # 验证贴吧名称合法性（防止路径遍历）
-        if not validate_forum_name(forum_name):
-            logger.error(f"贴吧名称 '{forum_name}' 包含非法字符，已拒绝处理")
-            return []
-        
         # 加载已有数据
         output_path = os.path.join(self.data_dir, f"{forum_name}.json")
         existing_tids: Set[str] = set()
@@ -350,13 +340,12 @@ class TiebaPlugin(Star):
 
         if os.path.exists(output_path):
             try:
-                async with aiofiles.open(output_path, 'r', encoding='utf-8') as f:
-                    content = await f.read()
-                    existing_threads = json.loads(content)
+                with open(output_path, 'r', encoding='utf-8') as f:
+                    existing_threads = json.load(f)
                     existing_tids = {str(t["tid"]) for t in existing_threads}
             except json.JSONDecodeError as e:
                 logger.error(f"贴吧[{forum_name}]数据文件JSON格式错误: {e}")
-            except (IOError, OSError) as e:
+            except Exception as e:
                 logger.error(f"读取贴吧[{forum_name}]数据文件失败: {e}")
 
         new_threads: List[Dict] = []
@@ -379,24 +368,21 @@ class TiebaPlugin(Star):
             new_threads.append(thread)
             existing_threads.append(thread)
 
-        # 保存数据（带锁）- 无论是否有新帖子，都确保数据被保存
-        async with self._file_lock:
-            try:
-                async with aiofiles.open(output_path, 'w', encoding='utf-8') as f:
-                    await f.write(json.dumps(existing_threads, ensure_ascii=False, indent=4))
+        # 保存数据（带锁）
+        if new_threads:
+            async with self._file_lock:
+                try:
+                    with open(output_path, 'w', encoding='utf-8') as f:
+                        json.dump(existing_threads, f, ensure_ascii=False, indent=4)
 
-                # 更新统计 - 只要有帖子数据就更新访问记录
-                if new_threads:
-                    await self.tracker.update_stats(forum_name, len(new_threads))
-                else:
-                    # 即使没有新帖子，也更新最后访问时间
-                    await self.tracker.update_forum_activity(forum_name)
-            except (IOError, OSError, TypeError) as e:
-                logger.error(f"保存贴吧[{forum_name}]数据失败: {e}")
+                    # 更新统计
+                    self.tracker.update_stats(forum_name, len(new_threads))
+                except Exception as e:
+                    logger.error(f"保存贴吧[{forum_name}]数据失败: {e}")
 
         # 发送热帖通知
         if hot_threads:
-            notify_groups = self.sub_manager.get_forum_groups(forum_name)
+            notify_groups = self.forum_groups.get(forum_name, [])
             for hot_info in hot_threads:
                 await self._send_hot_notification(hot_info, notify_groups)
 
@@ -409,7 +395,7 @@ class TiebaPlugin(Star):
                 try:
                     await self._send_thread(group_id, thread)
                     await asyncio.sleep(random.uniform(2, 4))
-                except (IOError, OSError, ConnectionError) as e:
+                except Exception as e:
                     logger.error(f"发送通知到群{group_id}失败: {e}")
 
     async def _send_thread(self, group_id: str, thread_info: Dict, is_manual: bool = False):
@@ -461,14 +447,14 @@ class TiebaPlugin(Star):
                 try:
                     if image_url and image_url.startswith(('http://', 'https://')):
                         chain.append(Comp.Image.fromURL(image_url))
-                except (IOError, OSError, ConnectionError) as img_e:
+                except Exception as img_e:
                     logger.warning(f"添加图片到消息时出错: {img_e}")
 
             # 发送消息
-            await self.context.send_message(group_id, MessageChain(chain))
+            await self.context.send_message(self._get_session_for_group(group_id), MessageChain(chain))
             logger.info(f"帖子通知已发送到群 {group_id}: {title}")
 
-        except (IOError, OSError, ConnectionError) as e:
+        except Exception as e:
             logger.error(f"发送通知到群 {group_id} 时出错: {e}")
 
     async def _send_hot_notification(self, hot_info: Dict, group_ids: List[str]):
@@ -506,11 +492,11 @@ class TiebaPlugin(Star):
                     ))
                     chain.append(Comp.Plain(f"🔗 链接: {url}"))
 
-                await self.context.send_message(group_id, MessageChain(chain))
+                await self.context.send_message(self._get_session_for_group(group_id), MessageChain(chain))
                 logger.info(f"热帖通知已发送到群 {group_id}: {title}")
                 await asyncio.sleep(random.uniform(2, 3))
 
-            except (IOError, OSError, ConnectionError) as e:
+            except Exception as e:
                 logger.error(f"发送热帖通知到群 {group_id} 时出错: {e}")
 
     async def _daily_report(self):
@@ -522,8 +508,8 @@ class TiebaPlugin(Star):
 
         sent_groups: Set[str] = set()
 
-        for forum_name in self.sub_manager.get_all_forums():
-            groups = self.sub_manager.get_forum_groups(forum_name)
+        for forum_name in self.forum_groups:
+            groups = self.forum_groups.get(forum_name, [])
 
             for group_id in groups:
                 if group_id in sent_groups:
@@ -534,7 +520,7 @@ class TiebaPlugin(Star):
                     await self._send_plain_text(group_id, msg)
                     sent_groups.add(group_id)
                     await asyncio.sleep(2)
-                except (IOError, OSError, ConnectionError) as e:
+                except Exception as e:
                     logger.error(f"发送每日报告到群{group_id}失败: {e}")
 
     def _build_report(self, yesterday: str, daily_stats: Dict, ranking: List[Dict], hot_threads: List[Dict]) -> str:
@@ -581,8 +567,8 @@ class TiebaPlugin(Star):
         """发送纯文本消息"""
         try:
             chain = [Comp.Plain(text)]
-            await self.context.send_message(group_id, MessageChain(chain))
-        except (IOError, OSError, ConnectionError) as e:
+            await self.context.send_message(self._get_session_for_group(group_id), MessageChain(chain))
+        except Exception as e:
             logger.error(f"发送消息到群 {group_id} 时出错: {e}")
 
     # ========== 命令处理 ==========
@@ -590,6 +576,7 @@ class TiebaPlugin(Star):
     @filter.command("tb菜单")
     async def cmd_menu(self, event: AstrMessageEvent):
         """显示主菜单"""
+        self._save_group_origin(event)
         if not self._is_admin(event):
             yield event.plain_result("⚠️ 只有管理员可以使用此命令")
             return
@@ -609,10 +596,9 @@ class TiebaPlugin(Star):
 ➖ /tb退订 <贴吧名> - 取消订阅
 ➖ /tb退订 <群号> <贴吧名> - 为指定群退订
 📋 /tb列表 - 查看当前群订阅
-📋 /tb全部订阅 - 查看所有订阅（按当前模式显示）
+📋 /tb全部订阅 - 查看所有群的订阅
 🔄 /tb刷新 <贴吧名> - 手动刷新指定贴吧
 🔎 /tb检查 - 立即检查所有贴吧
-⚙️ /tb模式 [贴吧/群] - 切换订阅显示模式
 
 💡 提示: 发送 /tb帮助 查看详细说明"""
         yield event.plain_result(msg)
@@ -620,6 +606,7 @@ class TiebaPlugin(Star):
     @filter.command("tb帮助")
     async def cmd_help(self, event: AstrMessageEvent):
         """显示详细帮助"""
+        self._save_group_origin(event)
         if not self._is_admin(event):
             yield event.plain_result("⚠️ 只有管理员可以使用此命令")
             return
@@ -646,23 +633,16 @@ class TiebaPlugin(Star):
 9️⃣ /tb退订 <群号> <贴吧名> - 为指定群退订贴吧(超级管理员)
    例: /tb退订 123456789 鸣潮
 🔟 /tb列表 - 查看当前群订阅的所有贴吧
-1️⃣1️⃣ /tb全部订阅 - 查看所有订阅情况(按当前模式显示)
+1️⃣1️⃣ /tb全部订阅 - 查看所有群的订阅情况(超级管理员)
 1️⃣2️⃣ /tb刷新 <贴吧名> - 手动刷新指定贴吧的最新帖子
    例: /tb刷新 鸣潮
-1️⃣3️⃣ /tb检查 - 立即检查所有订阅的贴吧
-1️⃣4️⃣ /tb模式 [贴吧/群] - 切换订阅显示模式
-   例: /tb模式 - 查看当前模式
-   例: /tb模式 贴吧 - 切换到贴吧对应群模式
-   例: /tb模式 群 - 切换到群对应贴吧模式
-
-【订阅模式说明】
-• 贴吧对应群模式: 显示每个贴吧推送到哪些群
-• 群对应贴吧模式: 显示每个群订阅了哪些贴吧"""
+1️⃣3️⃣ /tb检查 - 立即检查所有订阅的贴吧"""
         yield event.plain_result(msg)
 
     @filter.command("tb统计")
     async def cmd_stats(self, event: AstrMessageEvent):
         """查看发帖统计"""
+        self._save_group_origin(event)
         if not self._is_admin(event):
             yield event.plain_result("⚠️ 只有管理员可以使用此命令")
             return
@@ -691,6 +671,7 @@ class TiebaPlugin(Star):
     @filter.command("tb排行")
     async def cmd_rank(self, event: AstrMessageEvent):
         """查看贴吧活跃度排行"""
+        self._save_group_origin(event)
         if not self._is_admin(event):
             yield event.plain_result("⚠️ 只有管理员可以使用此命令")
             return
@@ -717,6 +698,7 @@ class TiebaPlugin(Star):
     @filter.command("tb热帖")
     async def cmd_hot(self, event: AstrMessageEvent):
         """查看热门帖子"""
+        self._save_group_origin(event)
         if not self._is_admin(event):
             yield event.plain_result("⚠️ 只有管理员可以使用此命令")
             return
@@ -748,6 +730,7 @@ class TiebaPlugin(Star):
     @filter.command("tb历史")
     async def cmd_history(self, event: AstrMessageEvent, forum_name: str = "", limit: str = "5"):
         """查看历史帖子"""
+        self._save_group_origin(event)
         if not self._is_admin(event):
             yield event.plain_result("⚠️ 只有管理员可以使用此命令")
             return
@@ -756,16 +739,10 @@ class TiebaPlugin(Star):
             yield event.plain_result("❌ 请指定贴吧名\n例: /tb历史 鸣潮\n例: /tb历史 鸣潮 10")
             return
 
-        # 验证贴吧名称合法性（防止路径遍历）
-        if not validate_forum_name(forum_name):
-            yield event.plain_result(f"❌ 贴吧名称 '{forum_name}' 包含非法字符")
-            return
-
         # 解析limit参数
         try:
             limit_num = int(limit)
         except ValueError:
-            yield event.plain_result(f"⚠️ 数量参数'{limit}'无效，使用默认值5")
             limit_num = 5
 
         limit_num = min(max(limit_num, 1), 20)
@@ -776,9 +753,8 @@ class TiebaPlugin(Star):
             return
 
         try:
-            async with aiofiles.open(file_path, 'r', encoding='utf-8') as f:
-                content = await f.read()
-                threads = json.loads(content)
+            with open(file_path, 'r', encoding='utf-8') as f:
+                threads = json.load(f)
 
             if not threads:
                 yield event.plain_result(f"📭 【{forum_name}吧】暂无帖子")
@@ -804,13 +780,14 @@ class TiebaPlugin(Star):
 
         except json.JSONDecodeError:
             yield event.plain_result("❌ 数据文件格式错误")
-        except (IOError, OSError) as e:
+        except Exception as e:
             logger.error(f"读取历史失败: {e}")
             yield event.plain_result("❌ 读取数据失败")
 
     @filter.command("tb搜索")
     async def cmd_search(self, event: AstrMessageEvent, keyword: str = ""):
-        """搜索帖子 - 优化版本：限制搜索范围，避免内存压力"""
+        """搜索帖子"""
+        self._save_group_origin(event)
         if not self._is_admin(event):
             yield event.plain_result("⚠️ 只有管理员可以使用此命令")
             return
@@ -819,68 +796,24 @@ class TiebaPlugin(Star):
             yield event.plain_result("❌ 请指定搜索关键词\n例: /tb搜索 攻略")
             return
 
-        # 限制关键词长度
-        if len(keyword) > 50:
-            yield event.plain_result("❌ 关键词过长，请限制在50个字符以内")
-            return
-
         results = []
-        files_searched = 0
-        max_files_to_search = 20  # 最多搜索20个文件
-        max_results = 10  # 最多返回10条结果
-        max_file_size = 5 * 1024 * 1024  # 单个文件最大5MB
-
-        # 只搜索已订阅的贴吧数据文件
-        subscribed_forums = set(self.sub_manager.get_all_forums())
 
         for filename in os.listdir(self.data_dir):
-            if files_searched >= max_files_to_search:
-                break
-
             if not filename.endswith('.json') or filename in ['hot_threads.json', 'stats.json', 'config.json', 'subscription.json']:
                 continue
 
             forum_name = filename[:-5]
-
-            # 只搜索已订阅的贴吧
-            if forum_name not in subscribed_forums:
-                continue
-
-            # 验证贴吧名称合法性
-            if not validate_forum_name(forum_name):
-                continue
-
             file_path = os.path.join(self.data_dir, filename)
 
-            # 检查文件大小，避免大文件导致内存问题
             try:
-                file_size = os.path.getsize(file_path)
-                if file_size > max_file_size:
-                    logger.warning(f"搜索跳过超大文件: {filename} ({file_size} bytes)")
-                    continue
-            except (IOError, OSError):
-                continue
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    threads = json.load(f)
 
-            files_searched += 1
-
-            try:
-                # 使用流式读取，限制读取大小
-                async with aiofiles.open(file_path, 'r', encoding='utf-8') as f:
-                    content = await f.read()
-                    # 限制内容大小
-                    if len(content) > max_file_size:
-                        logger.warning(f"搜索跳过内容过大的文件: {filename}")
-                        continue
-                    threads = json.loads(content)
-
-                # 只搜索最近100条帖子，避免遍历全部历史
-                recent_threads = threads[-100:] if len(threads) > 100 else threads
-
-                for thread in recent_threads:
+                for thread in threads:
                     title = thread.get('title', '')
-                    content_text = thread.get('text', '')
+                    content = thread.get('text', '')
 
-                    if keyword.lower() in title.lower() or keyword.lower() in content_text.lower():
+                    if keyword.lower() in title.lower() or keyword.lower() in content.lower():
                         results.append({
                             'tieba': forum_name,
                             'title': title,
@@ -888,18 +821,15 @@ class TiebaPlugin(Star):
                             'time': thread.get('create_time', '')
                         })
 
-                        if len(results) >= max_results:
+                        if len(results) >= 10:
                             break
 
-                if len(results) >= max_results:
+                if len(results) >= 10:
                     break
-
-                # 每处理一个文件后让出事件循环，避免阻塞
-                await asyncio.sleep(0)
 
             except json.JSONDecodeError:
                 logger.warning(f"搜索时JSON解析失败: {file_path}")
-            except (IOError, OSError):
+            except Exception:
                 continue
 
         if not results:
@@ -922,6 +852,7 @@ class TiebaPlugin(Star):
     @filter.command("tb订阅")
     async def cmd_subscribe(self, event: AstrMessageEvent, arg1: str = "", arg2: str = ""):
         """订阅贴吧 - 支持两种格式：/tb订阅 贴吧名 或 /tb订阅 群号 贴吧名"""
+        self._save_group_origin(event)
         if not self._is_admin(event):
             yield event.plain_result("⚠️ 只有管理员可以使用此命令")
             return
@@ -941,21 +872,25 @@ class TiebaPlugin(Star):
                 yield event.plain_result("❌ 该命令只能在群聊中使用，或在命令中指定群号")
                 return
 
-        # 使用订阅管理器
-        if self.sub_manager.is_subscribed(forum_name, group_id):
+        if forum_name not in self.forum_groups:
+            self.forum_groups[forum_name] = []
+
+        if group_id in self.forum_groups[forum_name]:
             yield event.plain_result(f"⚠️ 群{group_id}已订阅【{forum_name}吧】")
             return
 
-        if self.sub_manager.subscribe(forum_name, group_id):
-            # 重新初始化定时任务
-            self._init_scheduler()
-            yield event.plain_result(f"✅ 成功为群{group_id}订阅【{forum_name}吧】\n新帖子将推送到该群")
-        else:
-            yield event.plain_result("❌ 订阅失败，请检查日志")
+        self.forum_groups[forum_name].append(group_id)
+        await self._save_subscription_async()
+
+        # 重新初始化定时任务
+        self._init_scheduler()
+
+        yield event.plain_result(f"✅ 成功为群{group_id}订阅【{forum_name}吧】\n新帖子将推送到该群")
 
     @filter.command("tb退订")
     async def cmd_unsubscribe(self, event: AstrMessageEvent, arg1: str = "", arg2: str = ""):
         """退订贴吧 - 支持两种格式：/tb退订 贴吧名 或 /tb退订 群号 贴吧名"""
+        self._save_group_origin(event)
         if not self._is_admin(event):
             yield event.plain_result("⚠️ 只有管理员可以使用此命令")
             return
@@ -975,18 +910,27 @@ class TiebaPlugin(Star):
                 yield event.plain_result("❌ 该命令只能在群聊中使用，或在命令中指定群号")
                 return
 
-        if not self.sub_manager.is_subscribed(forum_name, group_id):
+        if forum_name not in self.forum_groups:
+            yield event.plain_result(f"❌ 【{forum_name}吧】未被监控")
+            return
+
+        if group_id not in self.forum_groups[forum_name]:
             yield event.plain_result(f"⚠️ 群{group_id}未订阅【{forum_name}吧】")
             return
 
-        if self.sub_manager.unsubscribe(forum_name, group_id):
-            yield event.plain_result(f"✅ 已取消群{group_id}对【{forum_name}吧】的订阅")
-        else:
-            yield event.plain_result("❌ 退订失败，请检查日志")
+        self.forum_groups[forum_name].remove(group_id)
+
+        # 如果没有群组订阅，删除该贴吧
+        if not self.forum_groups[forum_name]:
+            del self.forum_groups[forum_name]
+
+        await self._save_subscription_async()
+        yield event.plain_result(f"✅ 已取消群{group_id}对【{forum_name}吧】的订阅")
 
     @filter.command("tb列表")
     async def cmd_list(self, event: AstrMessageEvent):
         """查看当前群订阅列表"""
+        self._save_group_origin(event)
         if not self._is_admin(event):
             yield event.plain_result("⚠️ 只有管理员可以使用此命令")
             return
@@ -996,7 +940,10 @@ class TiebaPlugin(Star):
             yield event.plain_result("❌ 该命令只能在群聊中使用")
             return
 
-        subscribed = self.sub_manager.get_group_forums(group_id)
+        subscribed = []
+        for name, groups in self.forum_groups.items():
+            if group_id in groups:
+                subscribed.append(name)
 
         if not subscribed:
             yield event.plain_result("📭 本群暂无订阅任何贴吧")
@@ -1015,80 +962,36 @@ class TiebaPlugin(Star):
     @filter.command("tb全部订阅")
     async def cmd_all_subscriptions(self, event: AstrMessageEvent):
         """查看所有群的订阅情况（超级管理员命令）"""
+        self._save_group_origin(event)
         if not self._is_admin(event):
             yield event.plain_result("⚠️ 只有管理员可以使用此命令")
             return
 
-        all_forums = self.sub_manager.get_all_forums()
-        if not all_forums:
+        if not self.forum_groups:
             yield event.plain_result("📭 暂无订阅任何贴吧")
             return
 
         lines = []
-        lines.append(f"📋 全部订阅情况 (当前模式: {self.sub_manager.get_mode_display()})")
+        lines.append("📋 全部订阅情况")
         lines.append("=" * 30)
 
-        # 根据当前模式选择展示方式
-        if self.sub_manager.mode == self.sub_manager.MODE_FORUM_GROUPS:
-            # 贴吧对应群模式
-            for forum_name in sorted(all_forums):
-                groups = self.sub_manager.get_forum_groups(forum_name)
-                lines.append(f"\n【{forum_name}吧】")
-                if groups:
-                    for i, group_id in enumerate(groups, 1):
-                        lines.append(f"  {i}. 群{group_id}")
-                else:
-                    lines.append("  暂无群订阅")
-            lines.append("\n" + "=" * 30)
-            lines.append(f"总计: {len(all_forums)}个贴吧")
-        else:
-            # 群对应贴吧模式
-            all_groups = self.sub_manager.get_all_groups()
-            for group_id in sorted(all_groups):
-                forums = self.sub_manager.get_group_forums(group_id)
-                lines.append(f"\n【群{group_id}】")
-                if forums:
-                    for i, forum_name in enumerate(forums, 1):
-                        lines.append(f"  {i}. {forum_name}吧")
-                else:
-                    lines.append("  暂无贴吧订阅")
-            lines.append("\n" + "=" * 30)
-            lines.append(f"总计: {len(all_groups)}个群")
+        for forum_name, groups in sorted(self.forum_groups.items()):
+            lines.append(f"\n【{forum_name}吧】")
+            if groups:
+                for i, group_id in enumerate(groups, 1):
+                    lines.append(f"  {i}. 群{group_id}")
+            else:
+                lines.append("  暂无群订阅")
+
+        lines.append("\n" + "=" * 30)
+        lines.append(f"总计: {len(self.forum_groups)}个贴吧")
 
         yield event.plain_result("\n".join(lines))
-
-    @filter.command("tb模式")
-    async def cmd_mode(self, event: AstrMessageEvent, mode: str = ""):
-        """切换订阅显示模式
-        用法: /tb模式 - 查看当前模式
-              /tb模式 贴吧 - 切换到贴吧对应群模式
-              /tb模式 群 - 切换到群对应贴吧模式
-        """
-        if not self._is_admin(event):
-            yield event.plain_result("⚠️ 只有管理员可以使用此命令")
-            return
-
-        if not mode:
-            current = self.sub_manager.get_mode_display()
-            yield event.plain_result(f"📊 当前订阅模式: {current}\n\n可用模式:\n• 贴吧 - 贴吧对应群\n• 群 - 群对应贴吧")
-            return
-
-        if mode in ["贴吧", "forum", "forums"]:
-            if self.sub_manager.set_mode(self.sub_manager.MODE_FORUM_GROUPS):
-                yield event.plain_result("✅ 已切换到【贴吧对应群】模式\n使用 /tb全部订阅 查看效果")
-            else:
-                yield event.plain_result("❌ 模式切换失败")
-        elif mode in ["群", "group", "groups"]:
-            if self.sub_manager.set_mode(self.sub_manager.MODE_GROUP_FORUMS):
-                yield event.plain_result("✅ 已切换到【群对应贴吧】模式\n使用 /tb全部订阅 查看效果")
-            else:
-                yield event.plain_result("❌ 模式切换失败")
-        else:
-            yield event.plain_result("❌ 无效的模式\n可用: 贴吧 / 群")
 
     @filter.command("tb刷新")
     async def cmd_refresh(self, event: AstrMessageEvent, forum_name: str = ""):
         """手动刷新指定贴吧"""
+        self._save_group_origin(event)
         if not self._is_admin(event):
             yield event.plain_result("⚠️ 只有管理员可以使用此命令")
             return
@@ -1103,7 +1006,7 @@ class TiebaPlugin(Star):
             return
 
         # 检查是否订阅
-        if not self.sub_manager.is_subscribed(forum_name, group_id):
+        if forum_name not in self.forum_groups or group_id not in self.forum_groups.get(forum_name, []):
             yield event.plain_result(f"❌ 本群未订阅【{forum_name}吧】")
             return
 
@@ -1120,22 +1023,23 @@ class TiebaPlugin(Star):
             latest = threads[0]
             await self._send_thread(group_id, latest, is_manual=True)
 
-        except (IOError, OSError, ConnectionError) as e:
+        except Exception as e:
             logger.error(f"刷新贴吧失败: {e}")
             yield event.plain_result(f"❌ 刷新失败: {str(e)}")
 
     @filter.command("tb检查")
     async def cmd_check(self, event: AstrMessageEvent):
         """立即检查所有贴吧"""
+        self._save_group_origin(event)
         if not self._is_admin(event):
             yield event.plain_result("⚠️ 只有管理员可以使用此命令")
             return
 
-        forums = self.sub_manager.get_all_forums()
-        if not forums:
+        if not self.forum_groups:
             yield event.plain_result("❌ 未配置任何贴吧监控")
             return
 
+        forums = list(self.forum_groups.keys())
         yield event.plain_result(f"🔎 开始检查所有贴吧（共{len(forums)}个）...")
 
         try:
@@ -1146,7 +1050,7 @@ class TiebaPlugin(Star):
                 try:
                     await self._check_forum(forum_name)
                     success_count += 1
-                except (IOError, OSError, ConnectionError) as e:
+                except Exception as e:
                     logger.error(f"检查贴吧[{forum_name}]失败: {e}")
                     fail_count += 1
                 await asyncio.sleep(2)
@@ -1154,6 +1058,6 @@ class TiebaPlugin(Star):
             result_msg = f"检查完成！\n✅ 成功: {success_count}个\n❌ 失败: {fail_count}个"
             yield event.plain_result(result_msg)
 
-        except (IOError, OSError, ConnectionError) as e:
+        except Exception as e:
             logger.error(f"手动检查贴吧失败: {e}")
             yield event.plain_result(f"❌ 检查失败: {str(e)}")
