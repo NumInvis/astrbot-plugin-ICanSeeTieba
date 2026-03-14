@@ -62,6 +62,9 @@ class TiebaPlugin(Star):
         self._file_lock = asyncio.Lock()
 
         logger.info(f"贴吧观察者已加载: 监控{len(self.forum_groups)}个贴吧")
+        logger.info(f"贴吧列表: {list(self.forum_groups.keys())}")
+        logger.info(f"数据目录: {self.data_dir}")
+        logger.info(f"配置文件: {self.config_file}")
 
     def _load_config(self):
         """加载配置文件"""
@@ -77,15 +80,19 @@ class TiebaPlugin(Star):
         }
 
         # 从文件加载配置
+        logger.info(f"尝试加载配置文件: {self.config_file}")
         if os.path.exists(self.config_file):
             try:
                 with open(self.config_file, 'r', encoding='utf-8') as f:
                     loaded_config = json.load(f)
+                    logger.info(f"成功加载配置文件，包含贴吧: {list(loaded_config.get('forum_groups', {}).keys())}")
                     default_config.update(loaded_config)
             except json.JSONDecodeError as e:
                 logger.error(f"配置文件JSON格式错误: {e}")
             except Exception as e:
                 logger.error(f"加载配置文件失败: {e}")
+        else:
+            logger.warning(f"配置文件不存在: {self.config_file}")
 
         # 从 AstrBot 配置加载（优先级更高）
         if self.config:
@@ -202,8 +209,9 @@ class TiebaPlugin(Star):
 
     def _init_scheduler(self):
         """初始化定时任务"""
+        logger.info(f"初始化定时任务，当前监控贴吧数: {len(self.forum_groups)}")
         if not self.forum_groups:
-            logger.warning("没有配置任何贴吧监控")
+            logger.warning("没有配置任何贴吧监控，无法启动定时任务")
             return
 
         # 检查是否有调度器
