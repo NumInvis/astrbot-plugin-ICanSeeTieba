@@ -107,9 +107,9 @@ class TiebaPlugin(Star):
             if admin_from_config:
                 default_config["admin_users"] = [str(u) for u in admin_from_config]
 
-            # 加载贴吧-群组映射
+            # 加载贴吧-群组映射（只有在文件配置为空时才使用AstrBot配置）
             forum_groups_from_config = self.config.get("tieba_forum_groups", {})
-            if forum_groups_from_config:
+            if forum_groups_from_config and not default_config["forum_groups"]:
                 # 转换格式: {贴吧名: [群号]} -> {贴吧名: [群号列表]}
                 default_config["forum_groups"] = {
                     k: [str(g) for g in v]
