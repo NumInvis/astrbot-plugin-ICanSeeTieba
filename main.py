@@ -384,7 +384,7 @@ class TiebaPlugin(Star):
                         json.dump(existing_threads, f, ensure_ascii=False, indent=4)
 
                     # 更新统计
-                    self.tracker.update_stats(forum_name, len(new_threads))
+                    await self.tracker.update_stats(forum_name, len(new_threads))
                 except Exception as e:
                     logger.error(f"保存贴吧[{forum_name}]数据失败: {e}")
 
